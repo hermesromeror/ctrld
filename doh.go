@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cuonglm/osinfo"
 
@@ -127,7 +128,29 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 		}
 		c.Transport = transport
 	}
-	resp, err := c.Do(req)
+	var resp *http.Response
+	if r.isDoH3 {
+		attemptCtx := ctx
+		var attemptCancel context.CancelFunc
+		if deadline, ok := ctx.Deadline(); ok {
+			if rem := time.Until(deadline); rem > 1200*time.Millisecond {
+				attemptCtx, attemptCancel = context.WithTimeout(ctx, rem/2)
+			}
+		}
+		resp, err = c.Do(req.WithContext(attemptCtx))
+		if attemptCancel != nil {
+			attemptCancel()
+		}
+		if err != nil && ctx.Err() == nil {
+			if closer, ok := c.Transport.(interface{ CloseIdleConnections() }); ok {
+				closer.CloseIdleConnections()
+			}
+			Log(ctx, ProxyLogger.Load().Debug().Err(err), "retrying doh3 request on fresh connection")
+			resp, err = c.Do(req.Clone(ctx))
+		}
+	} else {
+		resp, err = c.Do(req)
+	}
 	if err != nil && r.uc.FallbackToDirectIP() {
 		retryCtx, cancel := r.uc.Context(context.WithoutCancel(ctx))
 		defer cancel()

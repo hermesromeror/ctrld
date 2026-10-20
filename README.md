@@ -1,4 +1,9 @@
-# ctrld
+# ctrld (Firewalla Gold Optimized Edition)
+
+> [!NOTE]
+> **Fork for Firewalla Gold:** This repository is a specialized branch based on ctrld v1.5.8 hardened for **Firewalla Gold (FWG)**.  
+> It introduces native Redis index discovery (0-lock), ultra-low memory tuning (sub-48MB peak), Stale-While-Revalidate (SWR), singleflight query deduplication per client, and zero-leak local reverse PTR interception.  
+> Full technical audit and implementation details: [FIREWALLA_OPTIMIZATIONS.md](FIREWALLA_OPTIMIZATIONS.md).
 
 ![Test](https://github.com/Control-D-Inc/ctrld/actions/workflows/ci.yml/badge.svg)
 [![Go Reference](https://pkg.go.dev/badge/github.com/Control-D-Inc/ctrld.svg)](https://pkg.go.dev/github.com/Control-D-Inc/ctrld)

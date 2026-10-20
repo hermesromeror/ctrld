@@ -29,8 +29,11 @@ import (
 )
 
 const (
-	staleTTL = 60 * time.Second
-	localTTL = 3600 * time.Second
+	staleTTL            = 60 * time.Second
+	localTTL            = 3600 * time.Second
+	negativeCacheMaxTTL = 60
+	prefetchThreshold   = 45 * time.Second
+	swrMaxStaleAge      = 5 * time.Minute
 	// zpaDNSEchoDomain is Zscaler Client Connector's fixed public health-check
 	// name. Client Connector must see the answer to it arrive on its own DNS
 	// path before it will synthesize addresses for Private Access applications.
@@ -113,14 +116,78 @@ type upstreamForResult struct {
 }
 
 func (p *prog) addCachedResponse(key dnscache.Key, answer *dns.Msg) {
+	if answer == nil {
+		return
+	}
+	// Never cache transient protocol or server errors (SERVFAIL, REFUSED, FORMERR, NOTIMP).
+	if answer.Rcode != dns.RcodeSuccess && answer.Rcode != dns.RcodeNameError {
+		return
+	}
 	ttl := ttlFromMsg(answer)
 	now := time.Now()
 	expired := now.Add(time.Duration(ttl) * time.Second)
 	if cachedTTL := p.cfg.Service.CacheTTLOverride; cachedTTL > 0 {
+		if answer.Rcode == dns.RcodeNameError && cachedTTL > negativeCacheMaxTTL {
+			cachedTTL = negativeCacheMaxTTL
+		}
 		expired = now.Add(time.Duration(cachedTTL) * time.Second)
+	} else if answer.Rcode == dns.RcodeNameError && ttl > negativeCacheMaxTTL {
+		expired = now.Add(time.Duration(negativeCacheMaxTTL) * time.Second)
 	}
 	setCachedAnswerTTL(answer, now, expired)
-	p.cache.Add(key, dnscache.NewValue(answer, expired))
+	p.cache.Add(key, dnscache.NewValue(answer.Copy(), expired))
+}
+
+func (p *prog) cachedExpireTime(req *dns.Msg, upstream string, dns64Prefix netip.Prefix, dns64Active bool) (time.Time, bool) {
+	if p.cache == nil {
+		return time.Time{}, false
+	}
+	if dns64Active && dns64RequestAllowed(req) {
+		if cv := p.cache.Get(dns64CacheKey(req, upstream, dns64Prefix)); cv != nil {
+			return cv.Expire, true
+		}
+	}
+	if cv := p.cache.Get(dnscache.NewKey(req, upstream)); cv != nil {
+		return cv.Expire, true
+	}
+	return time.Time{}, false
+}
+
+func (p *prog) refreshCacheAsync(req *proxyRequest, upstream string, upstreamCfg *ctrld.UpstreamConfig) {
+	if p.cache == nil || upstreamCfg == nil || req == nil || req.msg == nil || len(req.msg.Question) == 0 {
+		return
+	}
+	cacheKey := dnscache.NewKey(req.msg, upstream)
+	sfKey := fmt.Sprintf("%s|%d|%d|%s|%s", upstream, cacheKey.Qtype, cacheKey.Qclass, cacheKey.Name, cacheKey.ECS)
+	if _, loaded := p.prefetchInFlight.LoadOrStore(sfKey, struct{}{}); loaded {
+		return
+	}
+	msgCopy := req.msg.Copy()
+	ci := req.ci
+	go func() {
+		defer p.prefetchInFlight.Delete(sfKey)
+		bgCtx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, requestID())
+		if upstreamCfg.UpstreamSendClientInfo() && ci != nil {
+			bgCtx = context.WithValue(bgCtx, ctrld.ClientInfoCtxKey{}, ci)
+		}
+		dnsResolver, err := ctrld.NewResolver(upstreamCfg)
+		if err != nil {
+			return
+		}
+		resolveCtx, cancel := upstreamCfg.Context(bgCtx)
+		defer cancel()
+		fresh, err := dnsResolver.Resolve(resolveCtx, msgCopy)
+		if err != nil || fresh == nil || !sameQuestion(msgCopy, fresh) {
+			return
+		}
+		if fresh.Rcode != dns.RcodeSuccess && fresh.Rcode != dns.RcodeNameError {
+			return
+		}
+		p.um.noteSuccess(upstream)
+		fresh.Compress = true
+		p.addCachedResponse(cacheKey, fresh)
+		ctrld.Log(bgCtx, mainLog.Load().Debug(), "background cache refresh updated %s via %s", cacheKey.Name, upstream)
+	}()
 }
 
 func (p *prog) cachedResponse(req *dns.Msg, upstream string, dns64Prefix netip.Prefix, dns64Active bool, now time.Time) (answer, stale *dns.Msg, hit, dns64Hit, dns64Bypass bool) {
@@ -496,13 +563,16 @@ macRules:
 
 func (p *prog) proxyPrivatePtrLookup(ctx context.Context, msg *dns.Msg) *dns.Msg {
 	cDomainName := msg.Question[0].Name
-	locked := p.ptrLoopGuard.TryLock(cDomainName)
-	defer p.ptrLoopGuard.Unlock(cDomainName)
-	if !locked {
-		return nil
+	if p.cfg.Service.DiscoverPtr == nil || *p.cfg.Service.DiscoverPtr {
+		locked := p.ptrLoopGuard.TryLock(cDomainName)
+		defer p.ptrLoopGuard.Unlock(cDomainName)
+		if !locked {
+			return nil
+		}
 	}
 	ip := ipFromARPA(cDomainName)
 	if name := p.ciTable.LookupHostname(ip.String(), ""); name != "" {
+		ptrName := strings.ReplaceAll(strings.TrimSpace(name), " ", "-")
 		answer := new(dns.Msg)
 		answer.SetReply(msg)
 		answer.Compress = true
@@ -512,7 +582,7 @@ func (p *prog) proxyPrivatePtrLookup(ctx context.Context, msg *dns.Msg) *dns.Msg
 				Rrtype: dns.TypePTR,
 				Class:  dns.ClassINET,
 			},
-			Ptr: dns.Fqdn(name),
+			Ptr: dns.Fqdn(ptrName),
 		}}
 		ctrld.Log(ctx, mainLog.Load().Info(), "private PTR lookup, using client info table")
 		ctrld.Log(ctx, mainLog.Load().Debug(), "client info: %v", ctrld.ClientInfo{
@@ -528,11 +598,6 @@ func (p *prog) proxyPrivatePtrLookup(ctx context.Context, msg *dns.Msg) *dns.Msg
 func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg {
 	q := msg.Question[0]
 	hostname := strings.TrimSuffix(q.Name, ".")
-	locked := p.lanLoopGuard.TryLock(hostname)
-	defer p.lanLoopGuard.Unlock(hostname)
-	if !locked {
-		return nil
-	}
 	if ip := p.ciTable.LookupIPByHostname(hostname, q.Qtype == dns.TypeAAAA); ip != nil {
 		answer := new(dns.Msg)
 		answer.SetReply(msg)
@@ -645,6 +710,24 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	isLanOrPtrQuery := false
 	if req.ufr.matched {
 		ctrld.Log(ctx, mainLog.Load().Debug(), "%s, %s, %s -> %v", req.ufr.matchedPolicy, req.ufr.matchedNetwork, req.ufr.matchedRule, upstreams)
+		if req.ufr.matchedRule == noRuleMatched && p.ciTable != nil {
+			switch {
+			case isPrivatePtrLookup(req.msg):
+				isLanOrPtrQuery = true
+				if answer := p.proxyPrivatePtrLookup(ctx, req.msg); answer != nil {
+					res.answer = answer
+					res.clientInfo = true
+					return res
+				}
+			case isLanHostnameQuery(req.msg):
+				isLanOrPtrQuery = true
+				if answer := p.proxyLanHostnameQuery(ctx, req.msg); answer != nil {
+					res.answer = answer
+					res.clientInfo = true
+					return res
+				}
+			}
+		}
 	} else {
 		switch {
 		case req.ufr.zpaDNSEcho:
@@ -688,8 +771,13 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		if req.msg.Question[0].Qtype == dns.TypeAAAA {
 			dns64Prefix, dns64Active = p.activeDNS64Prefix()
 		}
-		for _, upstream := range upstreams {
-			answer, stale, hit, dns64Hit, dns64Bypass := p.cachedResponse(req.msg, upstream, dns64Prefix, dns64Active, time.Now())
+		now := time.Now()
+		for i, upstream := range upstreams {
+			var upstreamCfg *ctrld.UpstreamConfig
+			if i < len(upstreamConfigs) {
+				upstreamCfg = upstreamConfigs[i]
+			}
+			answer, stale, hit, dns64Hit, dns64Bypass := p.cachedResponse(req.msg, upstream, dns64Prefix, dns64Active, now)
 			if stale != nil {
 				staleAnswer = stale
 			}
@@ -697,7 +785,24 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				ctrld.Log(ctx, mainLog.Load().Debug(), "dns64: bypassing cached empty-AAAA answer for synthesis")
 			}
 			if !hit {
+				// Stale-While-Revalidate (SWR): if cache_serve_stale is enabled and the entry
+				// expired within swrMaxStaleAge, serve the stale record immediately and refresh
+				// it asynchronously in the background.
+				if serveStaleCache && stale != nil && !dns64Bypass {
+					if exp, ok := p.cachedExpireTime(req.msg, upstream, dns64Prefix, dns64Active); ok && now.Sub(exp) <= swrMaxStaleAge {
+						ctrld.Log(ctx, mainLog.Load().Debug(), "serving stale-while-revalidate cached response")
+						p.health.countCacheHit()
+						setCachedAnswerTTL(stale, now, now.Add(staleTTL))
+						p.refreshCacheAsync(req, upstream, upstreamCfg)
+						res.answer = stale
+						res.cached = true
+						return res
+					}
+				}
 				continue
+			}
+			if exp, ok := p.cachedExpireTime(req.msg, upstream, dns64Prefix, dns64Active); ok && exp.Sub(now) <= prefetchThreshold {
+				p.refreshCacheAsync(req, upstream, upstreamCfg)
 			}
 			if dns64Hit {
 				ctrld.Log(ctx, mainLog.Load().Debug(), "dns64: hit cached response variant")
@@ -852,9 +957,37 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to create resolver")
 			return nil, err
 		}
-		resolveCtx, cancel := upstreamConfig.Context(ctx)
-		defer cancel()
-		return dnsResolver.Resolve(resolveCtx, msg)
+		if len(msg.Question) == 0 {
+			resolveCtx, cancel := upstreamConfig.Context(ctx)
+			defer cancel()
+			return dnsResolver.Resolve(resolveCtx, msg)
+		}
+		q := msg.Question[0]
+		clientKey := ""
+		if upstreamConfig.UpstreamSendClientInfo() && req.ci != nil {
+			clientKey = req.ci.Mac + "|" + req.ci.IP + "|" + req.ci.Hostname
+		}
+		sfKey := fmt.Sprintf("%s|%d|%d|%s|%s|%s", upstream, q.Qtype, q.Qclass, strings.ToLower(q.Name), dnscache.CanonicalECS(msg), clientKey)
+		msgCopy := msg.Copy()
+		baseCtx := context.WithoutCancel(ctx)
+		val, err, shared := p.inflightResolveGroup.Do(sfKey, func() (any, error) {
+			resolveCtx, cancel := upstreamConfig.Context(baseCtx)
+			defer cancel()
+			return dnsResolver.Resolve(resolveCtx, msgCopy)
+		})
+		if err != nil || val == nil {
+			return nil, err
+		}
+		ans, _ := val.(*dns.Msg)
+		if ans == nil {
+			return nil, nil
+		}
+		cloned := ans.Copy()
+		cloned.Id = msg.Id
+		if shared {
+			ctrld.Log(ctx, mainLog.Load().Debug(), "coalesced in-flight query to %s: %s", upstream, upstreamConfig.Name)
+		}
+		return cloned, nil
 	}
 	resolve := func(upstream string, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) *dns.Msg {
 		if upstreamConfig.UpstreamSendClientInfo() && req.ci != nil {

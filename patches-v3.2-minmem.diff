@@ -1,0 +1,1100 @@
+diff --git a/cmd/cli/dns_proxy.go b/cmd/cli/dns_proxy.go
+index 50a1dd6..1b44943 100644
+--- a/cmd/cli/dns_proxy.go
++++ b/cmd/cli/dns_proxy.go
+@@ -29,8 +29,11 @@ import (
+ )
+ 
+ const (
+-	staleTTL = 60 * time.Second
+-	localTTL = 3600 * time.Second
++	staleTTL            = 60 * time.Second
++	localTTL            = 3600 * time.Second
++	negativeCacheMaxTTL = 60
++	prefetchThreshold   = 45 * time.Second
++	swrMaxStaleAge      = 5 * time.Minute
+ 	// zpaDNSEchoDomain is Zscaler Client Connector's fixed public health-check
+ 	// name. Client Connector must see the answer to it arrive on its own DNS
+ 	// path before it will synthesize addresses for Private Access applications.
+@@ -113,14 +116,78 @@ type upstreamForResult struct {
+ }
+ 
+ func (p *prog) addCachedResponse(key dnscache.Key, answer *dns.Msg) {
++	if answer == nil {
++		return
++	}
++	// Never cache transient protocol or server errors (SERVFAIL, REFUSED, FORMERR, NOTIMP).
++	if answer.Rcode != dns.RcodeSuccess && answer.Rcode != dns.RcodeNameError {
++		return
++	}
+ 	ttl := ttlFromMsg(answer)
+ 	now := time.Now()
+ 	expired := now.Add(time.Duration(ttl) * time.Second)
+ 	if cachedTTL := p.cfg.Service.CacheTTLOverride; cachedTTL > 0 {
++		if answer.Rcode == dns.RcodeNameError && cachedTTL > negativeCacheMaxTTL {
++			cachedTTL = negativeCacheMaxTTL
++		}
+ 		expired = now.Add(time.Duration(cachedTTL) * time.Second)
++	} else if answer.Rcode == dns.RcodeNameError && ttl > negativeCacheMaxTTL {
++		expired = now.Add(time.Duration(negativeCacheMaxTTL) * time.Second)
+ 	}
+ 	setCachedAnswerTTL(answer, now, expired)
+-	p.cache.Add(key, dnscache.NewValue(answer, expired))
++	p.cache.Add(key, dnscache.NewValue(answer.Copy(), expired))
++}
++
++func (p *prog) cachedExpireTime(req *dns.Msg, upstream string, dns64Prefix netip.Prefix, dns64Active bool) (time.Time, bool) {
++	if p.cache == nil {
++		return time.Time{}, false
++	}
++	if dns64Active && dns64RequestAllowed(req) {
++		if cv := p.cache.Get(dns64CacheKey(req, upstream, dns64Prefix)); cv != nil {
++			return cv.Expire, true
++		}
++	}
++	if cv := p.cache.Get(dnscache.NewKey(req, upstream)); cv != nil {
++		return cv.Expire, true
++	}
++	return time.Time{}, false
++}
++
++func (p *prog) refreshCacheAsync(req *proxyRequest, upstream string, upstreamCfg *ctrld.UpstreamConfig) {
++	if p.cache == nil || upstreamCfg == nil || req == nil || req.msg == nil || len(req.msg.Question) == 0 {
++		return
++	}
++	cacheKey := dnscache.NewKey(req.msg, upstream)
++	sfKey := fmt.Sprintf("%s|%d|%d|%s|%s", upstream, cacheKey.Qtype, cacheKey.Qclass, cacheKey.Name, cacheKey.ECS)
++	if _, loaded := p.prefetchInFlight.LoadOrStore(sfKey, struct{}{}); loaded {
++		return
++	}
++	msgCopy := req.msg.Copy()
++	ci := req.ci
++	go func() {
++		defer p.prefetchInFlight.Delete(sfKey)
++		bgCtx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, requestID())
++		if upstreamCfg.UpstreamSendClientInfo() && ci != nil {
++			bgCtx = context.WithValue(bgCtx, ctrld.ClientInfoCtxKey{}, ci)
++		}
++		dnsResolver, err := ctrld.NewResolver(upstreamCfg)
++		if err != nil {
++			return
++		}
++		resolveCtx, cancel := upstreamCfg.Context(bgCtx)
++		defer cancel()
++		fresh, err := dnsResolver.Resolve(resolveCtx, msgCopy)
++		if err != nil || fresh == nil || !sameQuestion(msgCopy, fresh) {
++			return
++		}
++		if fresh.Rcode != dns.RcodeSuccess && fresh.Rcode != dns.RcodeNameError {
++			return
++		}
++		p.um.noteSuccess(upstream)
++		fresh.Compress = true
++		p.addCachedResponse(cacheKey, fresh)
++		ctrld.Log(bgCtx, mainLog.Load().Debug(), "background cache refresh updated %s via %s", cacheKey.Name, upstream)
++	}()
+ }
+ 
+ func (p *prog) cachedResponse(req *dns.Msg, upstream string, dns64Prefix netip.Prefix, dns64Active bool, now time.Time) (answer, stale *dns.Msg, hit, dns64Hit, dns64Bypass bool) {
+@@ -496,13 +563,16 @@ macRules:
+ 
+ func (p *prog) proxyPrivatePtrLookup(ctx context.Context, msg *dns.Msg) *dns.Msg {
+ 	cDomainName := msg.Question[0].Name
+-	locked := p.ptrLoopGuard.TryLock(cDomainName)
+-	defer p.ptrLoopGuard.Unlock(cDomainName)
+-	if !locked {
+-		return nil
++	if p.cfg.Service.DiscoverPtr == nil || *p.cfg.Service.DiscoverPtr {
++		locked := p.ptrLoopGuard.TryLock(cDomainName)
++		defer p.ptrLoopGuard.Unlock(cDomainName)
++		if !locked {
++			return nil
++		}
+ 	}
+ 	ip := ipFromARPA(cDomainName)
+ 	if name := p.ciTable.LookupHostname(ip.String(), ""); name != "" {
++		ptrName := strings.ReplaceAll(strings.TrimSpace(name), " ", "-")
+ 		answer := new(dns.Msg)
+ 		answer.SetReply(msg)
+ 		answer.Compress = true
+@@ -512,7 +582,7 @@ func (p *prog) proxyPrivatePtrLookup(ctx context.Context, msg *dns.Msg) *dns.Msg
+ 				Rrtype: dns.TypePTR,
+ 				Class:  dns.ClassINET,
+ 			},
+-			Ptr: dns.Fqdn(name),
++			Ptr: dns.Fqdn(ptrName),
+ 		}}
+ 		ctrld.Log(ctx, mainLog.Load().Info(), "private PTR lookup, using client info table")
+ 		ctrld.Log(ctx, mainLog.Load().Debug(), "client info: %v", ctrld.ClientInfo{
+@@ -528,11 +598,6 @@ func (p *prog) proxyPrivatePtrLookup(ctx context.Context, msg *dns.Msg) *dns.Msg
+ func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg {
+ 	q := msg.Question[0]
+ 	hostname := strings.TrimSuffix(q.Name, ".")
+-	locked := p.lanLoopGuard.TryLock(hostname)
+-	defer p.lanLoopGuard.Unlock(hostname)
+-	if !locked {
+-		return nil
+-	}
+ 	if ip := p.ciTable.LookupIPByHostname(hostname, q.Qtype == dns.TypeAAAA); ip != nil {
+ 		answer := new(dns.Msg)
+ 		answer.SetReply(msg)
+@@ -645,6 +710,24 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
+ 	isLanOrPtrQuery := false
+ 	if req.ufr.matched {
+ 		ctrld.Log(ctx, mainLog.Load().Debug(), "%s, %s, %s -> %v", req.ufr.matchedPolicy, req.ufr.matchedNetwork, req.ufr.matchedRule, upstreams)
++		if req.ufr.matchedRule == noRuleMatched && p.ciTable != nil {
++			switch {
++			case isPrivatePtrLookup(req.msg):
++				isLanOrPtrQuery = true
++				if answer := p.proxyPrivatePtrLookup(ctx, req.msg); answer != nil {
++					res.answer = answer
++					res.clientInfo = true
++					return res
++				}
++			case isLanHostnameQuery(req.msg):
++				isLanOrPtrQuery = true
++				if answer := p.proxyLanHostnameQuery(ctx, req.msg); answer != nil {
++					res.answer = answer
++					res.clientInfo = true
++					return res
++				}
++			}
++		}
+ 	} else {
+ 		switch {
+ 		case req.ufr.zpaDNSEcho:
+@@ -688,8 +771,13 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
+ 		if req.msg.Question[0].Qtype == dns.TypeAAAA {
+ 			dns64Prefix, dns64Active = p.activeDNS64Prefix()
+ 		}
+-		for _, upstream := range upstreams {
+-			answer, stale, hit, dns64Hit, dns64Bypass := p.cachedResponse(req.msg, upstream, dns64Prefix, dns64Active, time.Now())
++		now := time.Now()
++		for i, upstream := range upstreams {
++			var upstreamCfg *ctrld.UpstreamConfig
++			if i < len(upstreamConfigs) {
++				upstreamCfg = upstreamConfigs[i]
++			}
++			answer, stale, hit, dns64Hit, dns64Bypass := p.cachedResponse(req.msg, upstream, dns64Prefix, dns64Active, now)
+ 			if stale != nil {
+ 				staleAnswer = stale
+ 			}
+@@ -697,8 +785,25 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
+ 				ctrld.Log(ctx, mainLog.Load().Debug(), "dns64: bypassing cached empty-AAAA answer for synthesis")
+ 			}
+ 			if !hit {
++				// Stale-While-Revalidate (SWR): if cache_serve_stale is enabled and the entry
++				// expired within swrMaxStaleAge, serve the stale record immediately and refresh
++				// it asynchronously in the background.
++				if serveStaleCache && stale != nil && !dns64Bypass {
++					if exp, ok := p.cachedExpireTime(req.msg, upstream, dns64Prefix, dns64Active); ok && now.Sub(exp) <= swrMaxStaleAge {
++						ctrld.Log(ctx, mainLog.Load().Debug(), "serving stale-while-revalidate cached response")
++						p.health.countCacheHit()
++						setCachedAnswerTTL(stale, now, now.Add(staleTTL))
++						p.refreshCacheAsync(req, upstream, upstreamCfg)
++						res.answer = stale
++						res.cached = true
++						return res
++					}
++				}
+ 				continue
+ 			}
++			if exp, ok := p.cachedExpireTime(req.msg, upstream, dns64Prefix, dns64Active); ok && exp.Sub(now) <= prefetchThreshold {
++				p.refreshCacheAsync(req, upstream, upstreamCfg)
++			}
+ 			if dns64Hit {
+ 				ctrld.Log(ctx, mainLog.Load().Debug(), "dns64: hit cached response variant")
+ 			} else {
+@@ -852,9 +957,37 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
+ 			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to create resolver")
+ 			return nil, err
+ 		}
+-		resolveCtx, cancel := upstreamConfig.Context(ctx)
+-		defer cancel()
+-		return dnsResolver.Resolve(resolveCtx, msg)
++		if len(msg.Question) == 0 {
++			resolveCtx, cancel := upstreamConfig.Context(ctx)
++			defer cancel()
++			return dnsResolver.Resolve(resolveCtx, msg)
++		}
++		q := msg.Question[0]
++		clientKey := ""
++		if upstreamConfig.UpstreamSendClientInfo() && req.ci != nil {
++			clientKey = req.ci.Mac + "|" + req.ci.IP + "|" + req.ci.Hostname
++		}
++		sfKey := fmt.Sprintf("%s|%d|%d|%s|%s|%s", upstream, q.Qtype, q.Qclass, strings.ToLower(q.Name), dnscache.CanonicalECS(msg), clientKey)
++		msgCopy := msg.Copy()
++		baseCtx := context.WithoutCancel(ctx)
++		val, err, shared := p.inflightResolveGroup.Do(sfKey, func() (any, error) {
++			resolveCtx, cancel := upstreamConfig.Context(baseCtx)
++			defer cancel()
++			return dnsResolver.Resolve(resolveCtx, msgCopy)
++		})
++		if err != nil || val == nil {
++			return nil, err
++		}
++		ans, _ := val.(*dns.Msg)
++		if ans == nil {
++			return nil, nil
++		}
++		cloned := ans.Copy()
++		cloned.Id = msg.Id
++		if shared {
++			ctrld.Log(ctx, mainLog.Load().Debug(), "coalesced in-flight query to %s: %s", upstream, upstreamConfig.Name)
++		}
++		return cloned, nil
+ 	}
+ 	resolve := func(upstream string, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) *dns.Msg {
+ 		if upstreamConfig.UpstreamSendClientInfo() && req.ci != nil {
+diff --git a/cmd/cli/prog.go b/cmd/cli/prog.go
+index 09c3809..89078ad 100644
+--- a/cmd/cli/prog.go
++++ b/cmd/cli/prog.go
+@@ -13,6 +13,7 @@ import (
+ 	"os"
+ 	"os/exec"
+ 	"runtime"
++	"runtime/debug"
+ 	"slices"
+ 	"sort"
+ 	"strconv"
+@@ -112,6 +113,8 @@ type prog struct {
+ 	apiReloadCh          chan *ctrld.Config
+ 	apiForceReloadCh     chan struct{}
+ 	apiForceReloadGroup  singleflight.Group
++	inflightResolveGroup singleflight.Group
++	prefetchInFlight     sync.Map
+ 	logConn              net.Conn
+ 	logConnMu            sync.Mutex
+ 	cs                   *controlServer
+@@ -627,6 +630,10 @@ func (p *prog) preRun() {
+ 		p.requiredMultiNICsConfig = requiredMultiNICsConfig()
+ 	}
+ 	p.runningIface = iface
++
++	// Enforce low-footprint memory management for embedded routers
++	debug.SetGCPercent(50)
++	debug.SetMemoryLimit(48 * 1024 * 1024) // 48 MiB soft limit
+ }
+ 
+ func (p *prog) postRun() {
+@@ -693,7 +700,7 @@ func (p *prog) apiConfigReload() {
+ 	lastUpdated := time.Now().Unix()
+ 	curVerStr := curVersion()
+ 	curVer, err := semver.NewVersion(curVerStr)
+-	isStable := curVer != nil && curVer.Prerelease() == ""
++	isStable := curVer != nil && curVer.Prerelease() == "" && curVer.Metadata() == ""
+ 	if err != nil || !isStable {
+ 		l := mainLog.Load().Warn()
+ 		if err != nil {
+@@ -944,7 +951,11 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
+ 	p.cacheFlushDomainsMap = nil
+ 	p.metricsQueryStats.Store(p.cfg.Service.MetricsQueryStats)
+ 	if p.cfg.Service.CacheEnable {
+-		cacher, err := dnscache.NewLRUCache(p.cfg.Service.CacheSize)
++		cacheSize := p.cfg.Service.CacheSize
++		if cacheSize > 4096 {
++			cacheSize = 4096
++		}
++		cacher, err := dnscache.NewLRUCache(cacheSize)
+ 		if err != nil {
+ 			mainLog.Load().Error().Err(err).Msg("failed to create cacher, caching is disabled")
+ 		} else {
+@@ -1013,11 +1024,33 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
+ 
+ 	// Newer versions of android and iOS denies permission which breaks connectivity.
+ 	if !isMobile() && !reload {
+-		wg.Add(1)
++		ciCtx, ciCancel := context.WithCancel(context.Background())
+ 		go func() {
+-			defer wg.Done()
+-			p.runClientInfoDiscover(ctx)
++			select {
++			case <-p.stopCh:
++			case <-p.runAbortCh:
++			}
++			ciCancel()
++		}()
++		go func() {
++			p.runClientInfoDiscover(ciCtx)
++		}()
++
++		// Periodic memory scavenger: release unused heap memory back to the OS every 2 minutes
++		go func() {
++			ticker := time.NewTicker(2 * time.Minute)
++			defer ticker.Stop()
++			for {
++				select {
++				case <-ticker.C:
++					debug.FreeOSMemory()
++				case <-ciCtx.Done():
++					return
++				}
++			}
+ 		}()
++	} else if !isMobile() && reload && p.ciTable != nil {
++		go p.ciTable.Refresh()
+ 	}
+ 
+ 	if !reload {
+diff --git a/config.go b/config.go
+index 4ac52ee..c36db97 100644
+--- a/config.go
++++ b/config.go
+@@ -290,6 +290,7 @@ type UpstreamConfig struct {
+ 	bootstrapIPs6      []string
+ 	transport          *http.Transport
+ 	transportOnce      sync.Once
++	transportMu        sync.Mutex
+ 	transport4         *http.Transport
+ 	transport6         *http.Transport
+ 	http3RoundTripper  http.RoundTripper
+@@ -661,6 +662,8 @@ func (uc *UpstreamConfig) SetupTransport() {
+ }
+ 
+ func (uc *UpstreamConfig) ensureSetupTransport() {
++	uc.transportMu.Lock()
++	defer uc.transportMu.Unlock()
+ 	uc.transportOnce.Do(func() {
+ 		uc.SetupTransport()
+ 	})
+@@ -814,6 +817,8 @@ func (uc *UpstreamConfig) isNextDNS() bool {
+ 
+ func (uc *UpstreamConfig) dohTransport(dnsType uint16) http.RoundTripper {
+ 	uc.ensureSetupTransport()
++	uc.transportMu.Lock()
++	defer uc.transportMu.Unlock()
+ 	return transportByIpStack(uc.IPStack, dnsType, uc.transport, uc.transport4, uc.transport6)
+ }
+ 
+@@ -915,7 +920,7 @@ func (uc *UpstreamConfig) FallbackToDirectIP() bool {
+ 	if !uc.IsControlD() {
+ 		return false
+ 	}
+-	if uc.u == nil || uc.Domain == "" {
++	if uc.u == nil || uc.Domain == "" || uc.BootstrapIP != "" {
+ 		return false
+ 	}
+ 
+diff --git a/config_quic.go b/config_quic.go
+index ab2778d..d0e17df 100644
+--- a/config_quic.go
++++ b/config_quic.go
+@@ -8,6 +8,7 @@ import (
+ 	"net/http"
+ 	"runtime"
+ 	"sync"
++	"time"
+ 
+ 	"github.com/quic-go/quic-go"
+ 	"github.com/quic-go/quic-go/http3"
+@@ -17,8 +18,18 @@ func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
+ 	if uc.Type != ResolverTypeDOH3 {
+ 		return nil
+ 	}
+-	rt := &http3.Transport{}
+-	rt.TLSClientConfig = &tls.Config{RootCAs: uc.certPool, MinVersion: tls.VersionTLS12}
++	rt := &http3.Transport{
++		TLSClientConfig: &tls.Config{
++			RootCAs:            uc.certPool,
++			ClientSessionCache: tls.NewLRUClientSessionCache(0),
++			MinVersion:         tls.VersionTLS12,
++		},
++		QUICConfig: &quic.Config{
++			MaxIdleTimeout:       90 * time.Second,
++			KeepAlivePeriod:      15 * time.Second,
++			HandshakeIdleTimeout: 1500 * time.Millisecond,
++		},
++	}
+ 	rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+ 		_, port, _ := net.SplitHostPort(addr)
+ 		// if we have a bootstrap ip set, use it to avoid DNS lookup
+@@ -62,16 +73,22 @@ func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
+ 
+ func (uc *UpstreamConfig) doh3Transport(dnsType uint16) http.RoundTripper {
+ 	uc.ensureSetupTransport()
++	uc.transportMu.Lock()
++	defer uc.transportMu.Unlock()
+ 	return transportByIpStack(uc.IPStack, dnsType, uc.http3RoundTripper, uc.http3RoundTripper4, uc.http3RoundTripper6)
+ }
+ 
+ func (uc *UpstreamConfig) doqTransport(dnsType uint16) *doqConnPool {
+ 	uc.ensureSetupTransport()
++	uc.transportMu.Lock()
++	defer uc.transportMu.Unlock()
+ 	return transportByIpStack(uc.IPStack, dnsType, uc.doqConnPool, uc.doqConnPool4, uc.doqConnPool6)
+ }
+ 
+ func (uc *UpstreamConfig) dotTransport(dnsType uint16) *dotConnPool {
+ 	uc.ensureSetupTransport()
++	uc.transportMu.Lock()
++	defer uc.transportMu.Unlock()
+ 	return transportByIpStack(uc.IPStack, dnsType, uc.dotClientPool, uc.dotClientPool4, uc.dotClientPool6)
+ }
+ 
+diff --git a/doh.go b/doh.go
+index 9f2b87d..f8abeef 100644
+--- a/doh.go
++++ b/doh.go
+@@ -12,6 +12,7 @@ import (
+ 	"runtime"
+ 	"strings"
+ 	"sync"
++	"time"
+ 
+ 	"github.com/cuonglm/osinfo"
+ 
+@@ -127,7 +128,29 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
+ 		}
+ 		c.Transport = transport
+ 	}
+-	resp, err := c.Do(req)
++	var resp *http.Response
++	if r.isDoH3 {
++		attemptCtx := ctx
++		var attemptCancel context.CancelFunc
++		if deadline, ok := ctx.Deadline(); ok {
++			if rem := time.Until(deadline); rem > 1200*time.Millisecond {
++				attemptCtx, attemptCancel = context.WithTimeout(ctx, rem/2)
++			}
++		}
++		resp, err = c.Do(req.WithContext(attemptCtx))
++		if attemptCancel != nil {
++			attemptCancel()
++		}
++		if err != nil && ctx.Err() == nil {
++			if closer, ok := c.Transport.(interface{ CloseIdleConnections() }); ok {
++				closer.CloseIdleConnections()
++			}
++			Log(ctx, ProxyLogger.Load().Debug().Err(err), "retrying doh3 request on fresh connection")
++			resp, err = c.Do(req.Clone(ctx))
++		}
++	} else {
++		resp, err = c.Do(req)
++	}
+ 	if err != nil && r.uc.FallbackToDirectIP() {
+ 		retryCtx, cancel := r.uc.Context(context.WithoutCancel(ctx))
+ 		defer cancel()
+diff --git a/internal/clientinfo/arp_linux.go b/internal/clientinfo/arp_linux.go
+index 3e48337..d026531 100644
+--- a/internal/clientinfo/arp_linux.go
++++ b/internal/clientinfo/arp_linux.go
+@@ -20,8 +20,15 @@ func (a *arpDiscover) scan() {
+ 	for s.Scan() {
+ 		line := s.Text()
+ 		fields := strings.Fields(line)
++		if len(fields) < 4 {
++			continue
++		}
+ 		ip := fields[0]
++		flags := fields[2]
+ 		mac := fields[3]
++		if flags == "0x0" || mac == "00:00:00:00:00:00" || mac == "*" || mac == "" {
++			continue
++		}
+ 		a.mac.Store(ip, mac)
+ 		a.ip.Store(mac, ip)
+ 	}
+diff --git a/internal/clientinfo/client_info.go b/internal/clientinfo/client_info.go
+index acae754..20d9085 100644
+--- a/internal/clientinfo/client_info.go
++++ b/internal/clientinfo/client_info.go
+@@ -83,6 +83,7 @@ type Table struct {
+ 	dhcp           *dhcp
+ 	merlin         *merlinDiscover
+ 	ubios          *ubiosDiscover
++	firewalla      *firewallaDiscover
+ 	arp            *arpDiscover
+ 	ndp            *ndpDiscover
+ 	ptr            *ptrDiscover
+@@ -209,15 +210,18 @@ func (t *Table) init() {
+ 	// Routers custom clients:
+ 	//  - Merlin
+ 	//  - Ubios
++	//  - Firewalla
+ 	if t.discoverDHCP() || t.discoverARP() {
+ 		t.merlin = &merlinDiscover{}
+ 		t.ubios = &ubiosDiscover{}
++		t.firewalla = &firewallaDiscover{}
+ 		discovers := map[string]interface {
+ 			refresher
+ 			HostnameResolver
+ 		}{
+-			"Merlin": t.merlin,
+-			"Ubios":  t.ubios,
++			"Merlin":    t.merlin,
++			"Ubios":     t.ubios,
++			"Firewalla": t.firewalla,
+ 		}
+ 		for platform, discover := range discovers {
+ 			if err := discover.refresh(); err != nil {
+@@ -283,6 +287,10 @@ func (t *Table) init() {
+ 		go t.ndp.listen(ctx)
+ 		go t.ndp.subscribe(ctx)
+ 	}
++	if t.firewalla != nil {
++		t.ipResolvers = append(t.ipResolvers, t.firewalla)
++		t.macResolvers = append(t.macResolvers, t.firewalla)
++	}
+ 	// PTR lookup.
+ 	if t.discoverPTR() {
+ 		t.ptr = &ptrDiscover{resolver: ctrld.NewPrivateResolver()}
+@@ -353,6 +361,9 @@ func (t *Table) LookupMac(ip string) string {
+ 
+ func (t *Table) LookupHostname(ip, mac string) string {
+ 	t.initOnce.Do(t.init)
++	if mac == "" && ip != "" && ip != ipV4Loopback && ip != ipv6Loopback {
++		mac = t.LookupMac(ip)
++	}
+ 	for _, r := range t.hostnameResolvers {
+ 		if name := r.LookupHostnameByIP(ip); name != "" {
+ 			return name
+@@ -435,7 +446,7 @@ func (t *Table) lookupHostnameAll(ip, mac string) []*hostnameEntry {
+ func (t *Table) ListClients() []*Client {
+ 	t.Refresh()
+ 	ipMap := make(map[string]*Client)
+-	il := []ipLister{t.dhcp, t.arp, t.ndp, t.ptr, t.mdns, t.vni}
++	il := []ipLister{t.dhcp, t.firewalla, t.arp, t.ndp, t.ptr, t.mdns, t.vni}
+ 
+ 	for _, ir := range il {
+ 		if ir == nil {
+@@ -513,7 +524,10 @@ func (t *Table) LookupIPByHostname(hostname string, v6 bool) *netip.Addr {
+ 	if t == nil {
+ 		return nil
+ 	}
+-	for _, finder := range []ipFinder{t.hf, t.ptr, t.mdns, t.dhcp} {
++	for _, finder := range []ipFinder{t.hf, t.firewalla, t.ptr, t.mdns, t.dhcp} {
++		if finder == nil {
++			continue
++		}
+ 		if addr := finder.lookupIPByHostname(hostname, v6); addr != "" {
+ 			if ip, err := netip.ParseAddr(addr); err == nil {
+ 				return &ip
+diff --git a/internal/clientinfo/firewalla.go b/internal/clientinfo/firewalla.go
+new file mode 100644
+index 0000000..68be3b5
+--- /dev/null
++++ b/internal/clientinfo/firewalla.go
+@@ -0,0 +1,338 @@
++package clientinfo
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net"
++	"net/netip"
++	"os"
++	"os/exec"
++	"strings"
++	"sync"
++	"time"
++
++	"github.com/Control-D-Inc/ctrld/internal/router"
++	"github.com/Control-D-Inc/ctrld/internal/router/firewalla"
++)
++
++const defaultFirewallaRedisCliPath = "/usr/bin/redis-cli"
++
++const firewallaRedisLuaScript = `
++local macs = redis.call("ZRANGE", "host:active:mac", 0, -1)
++local dhcp_macs = redis.call("SMEMBERS", "host:dhcpconf:mac")
++local seen = {}
++local result = {}
++for _, mac in ipairs(macs) do seen[string.lower(mac)] = mac end
++for _, mac in ipairs(dhcp_macs) do seen[string.lower(mac)] = mac end
++for _, raw_mac in pairs(seen) do
++    local key = "host:mac:" .. raw_mac
++    if redis.call("TYPE", key).ok == "hash" then
++        local name = redis.call("HGET", key, "name") or ""
++        local bname = redis.call("HGET", key, "bname") or ""
++        local dhcp = redis.call("HGET", key, "dhcpName") or ""
++        local vendor = redis.call("HGET", key, "macVendor") or ""
++        local ip = redis.call("HGET", key, "ipv4Addr") or redis.call("HGET", key, "ipv4") or ""
++        if ip ~= "" then
++            local ip_mac = redis.call("HGET", "host:ip4:" .. ip, "mac") or ""
++            if ip_mac ~= "" and string.lower(ip_mac) ~= string.lower(raw_mac) then
++                ip = ""
++            end
++        end
++        local ldom = redis.call("HGET", key, "userLocalDomain") or ""
++        if ldom == "" then ldom = redis.call("HGET", key, "localDomain") or "" end
++        table.insert(result, {mac=string.lower(raw_mac), ip=ip, name=name, bname=bname, dhcp=dhcp, vendor=vendor, ldom=ldom})
++    end
++end
++if #result == 0 then
++    local cursor = "0"
++    repeat
++        local scan_result = redis.call("SCAN", cursor, "MATCH", "host:mac:*", "COUNT", 1000)
++        cursor = scan_result[1]
++        for _, key in ipairs(scan_result[2]) do
++            if redis.call("TYPE", key).ok == "hash" then
++                local raw_mac = string.gsub(key, "host:mac:", "")
++                local mac = string.lower(raw_mac)
++                if not seen[mac] then
++                    seen[mac] = raw_mac
++                    local name = redis.call("HGET", key, "name") or ""
++                    local bname = redis.call("HGET", key, "bname") or ""
++                    local dhcp = redis.call("HGET", key, "dhcpName") or ""
++                    local vendor = redis.call("HGET", key, "macVendor") or ""
++                    local ip = redis.call("HGET", key, "ipv4Addr") or redis.call("HGET", key, "ipv4") or ""
++                    if ip ~= "" then
++                        local ip_mac = redis.call("HGET", "host:ip4:" .. ip, "mac") or ""
++                        if ip_mac ~= "" and string.lower(ip_mac) ~= mac then
++                            ip = ""
++                        end
++                    end
++                    local ldom = redis.call("HGET", key, "userLocalDomain") or ""
++                    if ldom == "" then ldom = redis.call("HGET", key, "localDomain") or "" end
++                    table.insert(result, {mac=mac, ip=ip, name=name, bname=bname, dhcp=dhcp, vendor=vendor, ldom=ldom})
++                end
++            end
++        end
++    until cursor == "0"
++end
++return cjson.encode(result)
++`
++
++type firewallaDeviceEntry struct {
++	MAC    string `json:"mac"`
++	IP     string `json:"ip"`
++	Name   string `json:"name"`
++	BName  string `json:"bname"`
++	DHCP   string `json:"dhcp"`
++	Vendor string `json:"vendor"`
++	LDom   string `json:"ldom"`
++}
++
++// firewallaDiscover provides client discovery functionality on Firewalla routers via local Redis.
++type firewallaDiscover struct {
++	mac2name     sync.Map // mac => hostname
++	ip2name      sync.Map // ip  => hostname
++	mac2ip       sync.Map // mac => ip
++	ip2mac       sync.Map // ip  => mac
++	domain2ip    sync.Map // lowercase domain/slug => ip
++	redisCliPath string
++	lastRefresh  time.Time
++	refreshMu    sync.Mutex
++}
++
++func (f *firewallaDiscover) refresh() error {
++	if router.Name() != firewalla.Name {
++		return nil
++	}
++	f.refreshMu.Lock()
++	defer f.refreshMu.Unlock()
++	if !f.lastRefresh.IsZero() && time.Since(f.lastRefresh) < 5*time.Minute {
++		return nil
++	}
++	err := f.refreshDevices()
++	if err == nil {
++		f.lastRefresh = time.Now()
++	}
++	return err
++}
++
++func (f *firewallaDiscover) LookupHostnameByIP(ip string) string {
++	if ip == "" {
++		return ""
++	}
++	val, ok := f.ip2name.Load(ip)
++	if !ok {
++		return ""
++	}
++	return val.(string)
++}
++
++func (f *firewallaDiscover) LookupHostnameByMac(mac string) string {
++	if mac == "" {
++		return ""
++	}
++	val, ok := f.mac2name.Load(strings.ToLower(mac))
++	if !ok {
++		return ""
++	}
++	return val.(string)
++}
++
++func (f *firewallaDiscover) LookupIP(mac string) string {
++	if mac == "" {
++		return ""
++	}
++	val, ok := f.mac2ip.Load(strings.ToLower(mac))
++	if !ok {
++		return ""
++	}
++	return val.(string)
++}
++
++func (f *firewallaDiscover) LookupMac(ip string) string {
++	if ip == "" {
++		return ""
++	}
++	val, ok := f.ip2mac.Load(ip)
++	if !ok {
++		return ""
++	}
++	return val.(string)
++}
++
++func (f *firewallaDiscover) List() []string {
++	if f == nil {
++		return nil
++	}
++	var ips []string
++	f.ip2mac.Range(func(key, value any) bool {
++		ips = append(ips, key.(string))
++		return true
++	})
++	return ips
++}
++
++func (f *firewallaDiscover) lookupIPByHostname(name string, v6 bool) string {
++	if f == nil || v6 || name == "" {
++		return ""
++	}
++	key := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
++	if val, ok := f.domain2ip.Load(key); ok {
++		if addr, err := netip.ParseAddr(val.(string)); err == nil && addr.Is4() {
++			return addr.String()
++		}
++	}
++	// Also try stripping .lan or .local suffix.
++	for _, suffix := range []string{".lan", ".local", ".home.arpa"} {
++		if strings.HasSuffix(key, suffix) {
++			short := strings.TrimSuffix(key, suffix)
++			if val, ok := f.domain2ip.Load(short); ok {
++				if addr, err := netip.ParseAddr(val.(string)); err == nil && addr.Is4() {
++					return addr.String()
++				}
++			}
++		}
++	}
++	return ""
++}
++
++func (f *firewallaDiscover) refreshDevices() error {
++	cliPath := f.redisExecutable()
++	fi, err := os.Stat(cliPath)
++	if errors.Is(err, os.ErrNotExist) {
++		return nil
++	}
++	if err != nil {
++		return fmt.Errorf("stat redis-cli executable: %w", err)
++	}
++	if !fi.Mode().IsRegular() || fi.Mode().Perm()&0111 == 0 {
++		return nil
++	}
++
++	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++	defer cancel()
++
++	cmd := exec.CommandContext(ctx, cliPath, "--raw", "EVAL", firewallaRedisLuaScript, "0")
++	b, err := cmd.Output()
++	if err != nil {
++		return fmt.Errorf("redis-cli eval: %w", err)
++	}
++	return f.storeDevices(bytes.NewReader(b))
++}
++
++func (f *firewallaDiscover) redisExecutable() string {
++	if f.redisCliPath != "" {
++		return f.redisCliPath
++	}
++	return defaultFirewallaRedisCliPath
++}
++
++func (f *firewallaDiscover) storeDevices(r io.Reader) error {
++	data, err := io.ReadAll(r)
++	if err != nil {
++		return err
++	}
++	trimmed := bytes.TrimSpace(data)
++	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("{}")) {
++		return nil
++	}
++	var entries []firewallaDeviceEntry
++	if err := json.Unmarshal(trimmed, &entries); err != nil {
++		return err
++	}
++	for _, dev := range entries {
++		mac := strings.ToLower(strings.TrimSpace(dev.MAC))
++		if mac == "" || mac == "00:00:00:00:00:00" {
++			continue
++		}
++		if _, err := net.ParseMAC(mac); err != nil {
++			continue
++		}
++
++		chosen := selectFirewallaHostname(dev)
++		ip := normalizeIP(strings.TrimSpace(dev.IP))
++		if ip != "" && net.ParseIP(ip) == nil {
++			ip = ""
++		}
++
++		if chosen != "" {
++			f.mac2name.Store(mac, chosen)
++			if ip != "" {
++				f.ip2name.Store(ip, chosen)
++				f.domain2ip.Store(strings.ToLower(chosen), ip)
++				slug := strings.ReplaceAll(strings.ToLower(chosen), " ", "-")
++				f.domain2ip.Store(slug, ip)
++			}
++		}
++		if ip != "" {
++			f.mac2ip.Store(mac, ip)
++			f.ip2mac.Store(ip, mac)
++			if ldom := strings.ToLower(strings.TrimSpace(dev.LDom)); ldom != "" {
++				f.domain2ip.Store(ldom, ip)
++			}
++		}
++	}
++	return nil
++}
++
++func selectFirewallaHostname(dev firewallaDeviceEntry) string {
++	name := strings.TrimSpace(dev.Name)
++	bname := strings.TrimSpace(dev.BName)
++	dhcp := strings.TrimSpace(dev.DHCP)
++	vendor := strings.TrimSpace(dev.Vendor)
++
++	var chosen string
++	switch {
++	case name != "":
++		chosen = name
++	case bname != "" && !strings.EqualFold(bname, vendor):
++		chosen = bname
++	case dhcp != "" && dhcp != "*":
++		chosen = dhcp
++	case bname != "":
++		if strings.EqualFold(bname, "FIREWALLA INC") {
++			chosen = "Firewalla"
++		} else {
++			chosen = bname
++		}
++	}
++	return cleanFirewallaHostname(chosen)
++}
++
++func cleanFirewallaHostname(s string) string {
++	if s == "" {
++		return ""
++	}
++	// Replace smart quotes/apostrophes with ASCII equivalents for HTTP header safety.
++	r := strings.NewReplacer(
++		"’", "'",
++		"‘", "'",
++		"“", "\"",
++		"”", "\"",
++	)
++	s = r.Replace(s)
++	s = strings.TrimSpace(s)
++	for _, suffix := range []string{".local.", ".local", ".lan.", ".lan"} {
++		if strings.HasSuffix(strings.ToLower(s), suffix) {
++			s = s[:len(s)-len(suffix)]
++			break
++		}
++	}
++	s = strings.TrimSpace(strings.TrimSuffix(s, "."))
++	// Ensure printable ASCII (0x20-0x7E) for HTTP headers.
++	var b strings.Builder
++	b.Grow(len(s))
++	for i := 0; i < len(s); i++ {
++		c := s[i]
++		if c >= 0x20 && c <= 0x7e {
++			b.WriteByte(c)
++		}
++	}
++	return strings.TrimSpace(b.String())
++}
++
++func (f *firewallaDiscover) String() string {
++	return "firewalla"
++}
+diff --git a/internal/clientinfo/firewalla_test.go b/internal/clientinfo/firewalla_test.go
+new file mode 100644
+index 0000000..9b5db40
+--- /dev/null
++++ b/internal/clientinfo/firewalla_test.go
+@@ -0,0 +1,68 @@
++package clientinfo
++
++import (
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++func Test_firewallaDiscover_refreshDevices_skipsUnavailableRedis(t *testing.T) {
++	t.Run("missing", func(t *testing.T) {
++		fd := &firewallaDiscover{redisCliPath: filepath.Join(t.TempDir(), "redis-cli")}
++		if err := fd.refreshDevices(); err != nil {
++			t.Fatalf("refreshDevices() error = %v", err)
++		}
++	})
++
++	t.Run("not executable", func(t *testing.T) {
++		path := filepath.Join(t.TempDir(), "redis-cli")
++		if err := os.WriteFile(path, nil, 0600); err != nil {
++			t.Fatal(err)
++		}
++		fd := &firewallaDiscover{redisCliPath: path}
++		if err := fd.refreshDevices(); err != nil {
++			t.Fatalf("refreshDevices() error = %v", err)
++		}
++	})
++}
++
++func Test_firewallaDiscover_storeDevices(t *testing.T) {
++	fd := &firewallaDiscover{}
++	jsonInput := `[
++		{"mac":"02:75:af:bc:91:2c","ip":"192.168.50.20","name":"Homeassistant","bname":"homeassistant","dhcp":"homeassistant","vendor":"Unknown","ldom":"homeassistant"},
++		{"mac":"1c:f2:9a:07:21:e8","ip":"192.168.30.189","name":"Master Bedroom Google Display","bname":"Master Bedroom display","dhcp":"","vendor":"Google, Inc.","ldom":"master.bedroom.google.display"},
++		{"mac":"34:e1:d1:80:64:21","ip":"192.168.30.254","name":"","bname":"Hubitat Hubitat","dhcp":"","vendor":"Hubitat Inc.","ldom":"hubitat"},
++		{"mac":"32:69:5d:f0:1f:7a","ip":"192.168.20.104","name":"","bname":"Mariana’s iPad","dhcp":"iPad","vendor":"Unknown","ldom":"marianas.ipad"},
++		{"mac":"20:6d:31:31:1c:ac","ip":"192.168.20.1","name":"","bname":"FIREWALLA INC","dhcp":"","vendor":"FIREWALLA INC","ldom":""},
++		{"mac":"00:00:00:00:00:00","ip":"192.168.20.99","name":"Phantom","bname":"","dhcp":"","vendor":"","ldom":""}
++	]`
++	if err := fd.storeDevices(strings.NewReader(jsonInput)); err != nil {
++		t.Fatalf("storeDevices() error = %v", err)
++	}
++
++	if got := fd.LookupHostnameByMac("02:75:af:bc:91:2c"); got != "Homeassistant" {
++		t.Errorf("want Homeassistant, got %q", got)
++	}
++	if got := fd.LookupHostnameByIP("192.168.30.189"); got != "Master Bedroom Google Display" {
++		t.Errorf("want Master Bedroom Google Display, got %q", got)
++	}
++	if got := fd.LookupHostnameByIP("192.168.30.254"); got != "Hubitat Hubitat" {
++		t.Errorf("want Hubitat Hubitat, got %q", got)
++	}
++	if got := fd.LookupHostnameByMac("32:69:5d:f0:1f:7a"); got != "Mariana's iPad" {
++		t.Errorf("want Mariana's iPad, got %q", got)
++	}
++	if got := fd.LookupHostnameByMac("20:6d:31:31:1c:ac"); got != "Firewalla" {
++		t.Errorf("want Firewalla, got %q", got)
++	}
++	if got := fd.LookupHostnameByIP("192.168.20.99"); got != "" {
++		t.Errorf("zero mac should be ignored, got %q", got)
++	}
++	if got := fd.lookupIPByHostname("master.bedroom.google.display", false); got != "192.168.30.189" {
++		t.Errorf("lookupIPByHostname ldom want 192.168.30.189, got %q", got)
++	}
++	if got := fd.lookupIPByHostname("homeassistant.lan", false); got != "192.168.50.20" {
++		t.Errorf("lookupIPByHostname .lan want 192.168.50.20, got %q", got)
++	}
++}
+diff --git a/internal/clientinfo/ndp_linux.go b/internal/clientinfo/ndp_linux.go
+index ebd416f..972ae74 100644
+--- a/internal/clientinfo/ndp_linux.go
++++ b/internal/clientinfo/ndp_linux.go
+@@ -2,6 +2,7 @@ package clientinfo
+ 
+ import (
+ 	"context"
++	"time"
+ 
+ 	"github.com/vishvananda/netlink"
+ 	"golang.org/x/sys/unix"
+@@ -9,6 +10,14 @@ import (
+ 	"github.com/Control-D-Inc/ctrld"
+ )
+ 
++const (
++	ndpNetlinkRcvBuf     = 4 * 1024 * 1024
++	ndpChannelBufSize    = 1024
++	ndpResubscribeDelay  = 5 * time.Second
++	ndpReasonChanClosed  = "neighbor channel closed"
++	ndpReasonContextDone = "context done"
++)
++
+ // scan populates NDP table using information from system mappings.
+ func (nd *ndpDiscover) scan() {
+ 	neighs, err := netlink.NeighList(0, netlink.FAMILY_V6)
+@@ -28,20 +37,59 @@ func (nd *ndpDiscover) scan() {
+ 	}
+ }
+ 
++func (nd *ndpDiscover) neighSubscribe(ch chan<- netlink.NeighUpdate, done <-chan struct{}) error {
++	opts := netlink.NeighSubscribeOptions{
++		ErrorCallback: func(err error) {
++			ctrld.ProxyLogger.Load().Warn().Err(err).Msg("NDP neighbor subscription error")
++		},
++		ReceiveBufferSize:      ndpNetlinkRcvBuf,
++		ReceiveBufferForceSize: true,
++	}
++	if err := netlink.NeighSubscribeWithOptions(ch, done, opts); err != nil {
++		ctrld.ProxyLogger.Load().Warn().Err(err).Msg("NDP neighbor subscribe with SO_RCVBUFFORCE failed, retrying with SO_RCVBUF")
++		opts.ReceiveBufferForceSize = false
++		return netlink.NeighSubscribeWithOptions(ch, done, opts)
++	}
++	return nil
++}
++
+ // subscribe watches NDP table changes and update new information to local table.
+ func (nd *ndpDiscover) subscribe(ctx context.Context) {
+-	ch := make(chan netlink.NeighUpdate)
++	for attempt := 1; ; attempt++ {
++		reason := nd.subscribeOnce(ctx, attempt)
++		if reason != ndpReasonChanClosed {
++			ctrld.ProxyLogger.Load().Warn().Msgf("NDP neighbor subscription #%d ended: %s", attempt, reason)
++			return
++		}
++		ctrld.ProxyLogger.Load().Warn().Msgf("NDP neighbor subscription #%d ended (%s), re-subscribing in %s", attempt, reason, ndpResubscribeDelay)
++		timer := time.NewTimer(ndpResubscribeDelay)
++		select {
++		case <-ctx.Done():
++			timer.Stop()
++			return
++		case <-timer.C:
++		}
++		nd.scan()
++	}
++}
++
++func (nd *ndpDiscover) subscribeOnce(ctx context.Context, attempt int) string {
++	ch := make(chan netlink.NeighUpdate, ndpChannelBufSize)
+ 	done := make(chan struct{})
+ 	defer close(done)
+-	if err := netlink.NeighSubscribe(ch, done); err != nil {
++	if err := nd.neighSubscribe(ch, done); err != nil {
+ 		ctrld.ProxyLogger.Load().Err(err).Msg("could not perform neighbor subscribing")
+-		return
++		return "subscribe error"
+ 	}
++	ctrld.ProxyLogger.Load().Info().Msgf("NDP neighbor subscription #%d started (rcvbuf requested %d bytes)", attempt, ndpNetlinkRcvBuf)
+ 	for {
+ 		select {
+ 		case <-ctx.Done():
+-			return
+-		case nu := <-ch:
++			return ndpReasonContextDone
++		case nu, ok := <-ch:
++			if !ok {
++				return ndpReasonChanClosed
++			}
+ 			if nu.Family != netlink.FAMILY_V6 {
+ 				continue
+ 			}
+diff --git a/internal/router/firewalla/firewalla.go b/internal/router/firewalla/firewalla.go
+index cdf6586..d881c19 100644
+--- a/internal/router/firewalla/firewalla.go
++++ b/internal/router/firewalla/firewalla.go
+@@ -61,9 +61,12 @@ func (f *Firewalla) Setup() error {
+ 	if err != nil {
+ 		return fmt.Errorf("generating dnsmasq config: %w", err)
+ 	}
+-	if err := os.WriteFile(firewallaDNSMasqConfigPath, []byte(data), 0600); err != nil {
++	if err := os.WriteFile(firewallaDNSMasqConfigPath, []byte(data), 0644); err != nil {
+ 		return fmt.Errorf("writing ctrld config: %w", err)
+ 	}
++	if err := os.Chmod(firewallaDNSMasqConfigPath, 0644); err != nil {
++		return fmt.Errorf("chmod ctrld config: %w", err)
++	}
+ 
+ 	// Restart dnsmasq service.
+ 	if err := restartDNSMasq(); err != nil {

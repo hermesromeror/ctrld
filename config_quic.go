@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
@@ -17,8 +18,18 @@ func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
 	if uc.Type != ResolverTypeDOH3 {
 		return nil
 	}
-	rt := &http3.Transport{}
-	rt.TLSClientConfig = &tls.Config{RootCAs: uc.certPool, MinVersion: tls.VersionTLS12}
+	rt := &http3.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:            uc.certPool,
+			ClientSessionCache: tls.NewLRUClientSessionCache(0),
+			MinVersion:         tls.VersionTLS12,
+		},
+		QUICConfig: &quic.Config{
+			MaxIdleTimeout:       90 * time.Second,
+			KeepAlivePeriod:      15 * time.Second,
+			HandshakeIdleTimeout: 1500 * time.Millisecond,
+		},
+	}
 	rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 		_, port, _ := net.SplitHostPort(addr)
 		// if we have a bootstrap ip set, use it to avoid DNS lookup
@@ -62,16 +73,22 @@ func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
 
 func (uc *UpstreamConfig) doh3Transport(dnsType uint16) http.RoundTripper {
 	uc.ensureSetupTransport()
+	uc.transportMu.Lock()
+	defer uc.transportMu.Unlock()
 	return transportByIpStack(uc.IPStack, dnsType, uc.http3RoundTripper, uc.http3RoundTripper4, uc.http3RoundTripper6)
 }
 
 func (uc *UpstreamConfig) doqTransport(dnsType uint16) *doqConnPool {
 	uc.ensureSetupTransport()
+	uc.transportMu.Lock()
+	defer uc.transportMu.Unlock()
 	return transportByIpStack(uc.IPStack, dnsType, uc.doqConnPool, uc.doqConnPool4, uc.doqConnPool6)
 }
 
 func (uc *UpstreamConfig) dotTransport(dnsType uint16) *dotConnPool {
 	uc.ensureSetupTransport()
+	uc.transportMu.Lock()
+	defer uc.transportMu.Unlock()
 	return transportByIpStack(uc.IPStack, dnsType, uc.dotClientPool, uc.dotClientPool4, uc.dotClientPool6)
 }
 

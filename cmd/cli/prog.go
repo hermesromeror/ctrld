@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"sort"
 	"strconv"
@@ -112,6 +113,8 @@ type prog struct {
 	apiReloadCh          chan *ctrld.Config
 	apiForceReloadCh     chan struct{}
 	apiForceReloadGroup  singleflight.Group
+	inflightResolveGroup singleflight.Group
+	prefetchInFlight     sync.Map
 	logConn              net.Conn
 	logConnMu            sync.Mutex
 	cs                   *controlServer
@@ -627,6 +630,10 @@ func (p *prog) preRun() {
 		p.requiredMultiNICsConfig = requiredMultiNICsConfig()
 	}
 	p.runningIface = iface
+
+	// Enforce low-footprint memory management for embedded routers
+	debug.SetGCPercent(50)
+	debug.SetMemoryLimit(48 * 1024 * 1024) // 48 MiB soft limit
 }
 
 func (p *prog) postRun() {
@@ -693,7 +700,7 @@ func (p *prog) apiConfigReload() {
 	lastUpdated := time.Now().Unix()
 	curVerStr := curVersion()
 	curVer, err := semver.NewVersion(curVerStr)
-	isStable := curVer != nil && curVer.Prerelease() == ""
+	isStable := curVer != nil && curVer.Prerelease() == "" && curVer.Metadata() == ""
 	if err != nil || !isStable {
 		l := mainLog.Load().Warn()
 		if err != nil {
@@ -944,7 +951,11 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	p.cacheFlushDomainsMap = nil
 	p.metricsQueryStats.Store(p.cfg.Service.MetricsQueryStats)
 	if p.cfg.Service.CacheEnable {
-		cacher, err := dnscache.NewLRUCache(p.cfg.Service.CacheSize)
+		cacheSize := p.cfg.Service.CacheSize
+		if cacheSize > 4096 {
+			cacheSize = 4096
+		}
+		cacher, err := dnscache.NewLRUCache(cacheSize)
 		if err != nil {
 			mainLog.Load().Error().Err(err).Msg("failed to create cacher, caching is disabled")
 		} else {
@@ -1013,11 +1024,33 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 
 	// Newer versions of android and iOS denies permission which breaks connectivity.
 	if !isMobile() && !reload {
-		wg.Add(1)
+		ciCtx, ciCancel := context.WithCancel(context.Background())
 		go func() {
-			defer wg.Done()
-			p.runClientInfoDiscover(ctx)
+			select {
+			case <-p.stopCh:
+			case <-p.runAbortCh:
+			}
+			ciCancel()
 		}()
+		go func() {
+			p.runClientInfoDiscover(ciCtx)
+		}()
+
+		// Periodic memory scavenger: release unused heap memory back to the OS every 2 minutes
+		go func() {
+			ticker := time.NewTicker(2 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					debug.FreeOSMemory()
+				case <-ciCtx.Done():
+					return
+				}
+			}
+		}()
+	} else if !isMobile() && reload && p.ciTable != nil {
+		go p.ciTable.Refresh()
 	}
 
 	if !reload {

@@ -290,6 +290,7 @@ type UpstreamConfig struct {
 	bootstrapIPs6      []string
 	transport          *http.Transport
 	transportOnce      sync.Once
+	transportMu        sync.Mutex
 	transport4         *http.Transport
 	transport6         *http.Transport
 	http3RoundTripper  http.RoundTripper
@@ -661,6 +662,8 @@ func (uc *UpstreamConfig) SetupTransport() {
 }
 
 func (uc *UpstreamConfig) ensureSetupTransport() {
+	uc.transportMu.Lock()
+	defer uc.transportMu.Unlock()
 	uc.transportOnce.Do(func() {
 		uc.SetupTransport()
 	})
@@ -814,6 +817,8 @@ func (uc *UpstreamConfig) isNextDNS() bool {
 
 func (uc *UpstreamConfig) dohTransport(dnsType uint16) http.RoundTripper {
 	uc.ensureSetupTransport()
+	uc.transportMu.Lock()
+	defer uc.transportMu.Unlock()
 	return transportByIpStack(uc.IPStack, dnsType, uc.transport, uc.transport4, uc.transport6)
 }
 
@@ -915,7 +920,7 @@ func (uc *UpstreamConfig) FallbackToDirectIP() bool {
 	if !uc.IsControlD() {
 		return false
 	}
-	if uc.u == nil || uc.Domain == "" {
+	if uc.u == nil || uc.Domain == "" || uc.BootstrapIP != "" {
 		return false
 	}
 

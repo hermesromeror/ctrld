@@ -83,6 +83,7 @@ type Table struct {
 	dhcp           *dhcp
 	merlin         *merlinDiscover
 	ubios          *ubiosDiscover
+	firewalla      *firewallaDiscover
 	arp            *arpDiscover
 	ndp            *ndpDiscover
 	ptr            *ptrDiscover
@@ -209,15 +210,18 @@ func (t *Table) init() {
 	// Routers custom clients:
 	//  - Merlin
 	//  - Ubios
+	//  - Firewalla
 	if t.discoverDHCP() || t.discoverARP() {
 		t.merlin = &merlinDiscover{}
 		t.ubios = &ubiosDiscover{}
+		t.firewalla = &firewallaDiscover{}
 		discovers := map[string]interface {
 			refresher
 			HostnameResolver
 		}{
-			"Merlin": t.merlin,
-			"Ubios":  t.ubios,
+			"Merlin":    t.merlin,
+			"Ubios":     t.ubios,
+			"Firewalla": t.firewalla,
 		}
 		for platform, discover := range discovers {
 			if err := discover.refresh(); err != nil {
@@ -282,6 +286,10 @@ func (t *Table) init() {
 		}()
 		go t.ndp.listen(ctx)
 		go t.ndp.subscribe(ctx)
+	}
+	if t.firewalla != nil {
+		t.ipResolvers = append(t.ipResolvers, t.firewalla)
+		t.macResolvers = append(t.macResolvers, t.firewalla)
 	}
 	// PTR lookup.
 	if t.discoverPTR() {
@@ -353,6 +361,9 @@ func (t *Table) LookupMac(ip string) string {
 
 func (t *Table) LookupHostname(ip, mac string) string {
 	t.initOnce.Do(t.init)
+	if mac == "" && ip != "" && ip != ipV4Loopback && ip != ipv6Loopback {
+		mac = t.LookupMac(ip)
+	}
 	for _, r := range t.hostnameResolvers {
 		if name := r.LookupHostnameByIP(ip); name != "" {
 			return name
@@ -435,7 +446,7 @@ func (t *Table) lookupHostnameAll(ip, mac string) []*hostnameEntry {
 func (t *Table) ListClients() []*Client {
 	t.Refresh()
 	ipMap := make(map[string]*Client)
-	il := []ipLister{t.dhcp, t.arp, t.ndp, t.ptr, t.mdns, t.vni}
+	il := []ipLister{t.dhcp, t.firewalla, t.arp, t.ndp, t.ptr, t.mdns, t.vni}
 
 	for _, ir := range il {
 		if ir == nil {
@@ -513,7 +524,10 @@ func (t *Table) LookupIPByHostname(hostname string, v6 bool) *netip.Addr {
 	if t == nil {
 		return nil
 	}
-	for _, finder := range []ipFinder{t.hf, t.ptr, t.mdns, t.dhcp} {
+	for _, finder := range []ipFinder{t.hf, t.firewalla, t.ptr, t.mdns, t.dhcp} {
+		if finder == nil {
+			continue
+		}
 		if addr := finder.lookupIPByHostname(hostname, v6); addr != "" {
 			if ip, err := netip.ParseAddr(addr); err == nil {
 				return &ip
