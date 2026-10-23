@@ -34,6 +34,7 @@ const (
 	negativeCacheMaxTTL = 60
 	prefetchThreshold   = 45 * time.Second
 	swrMaxStaleAge      = 5 * time.Minute
+	fallbackCacheMaxTTL = 60
 	// zpaDNSEchoDomain is Zscaler Client Connector's fixed public health-check
 	// name. Client Connector must see the answer to it arrive on its own DNS
 	// path before it will synthesize addresses for Private Access applications.
@@ -116,6 +117,10 @@ type upstreamForResult struct {
 }
 
 func (p *prog) addCachedResponse(key dnscache.Key, answer *dns.Msg) {
+	p.addCachedResponseWithMaxTTL(key, answer, 0)
+}
+
+func (p *prog) addCachedResponseWithMaxTTL(key dnscache.Key, answer *dns.Msg, maxTTL uint32) {
 	if answer == nil {
 		return
 	}
@@ -124,9 +129,15 @@ func (p *prog) addCachedResponse(key dnscache.Key, answer *dns.Msg) {
 		return
 	}
 	ttl := ttlFromMsg(answer)
+	if maxTTL > 0 && ttl > maxTTL {
+		ttl = maxTTL
+	}
 	now := time.Now()
 	expired := now.Add(time.Duration(ttl) * time.Second)
 	if cachedTTL := p.cfg.Service.CacheTTLOverride; cachedTTL > 0 {
+		if maxTTL > 0 && cachedTTL > int(maxTTL) {
+			cachedTTL = int(maxTTL)
+		}
 		if answer.Rcode == dns.RcodeNameError && cachedTTL > negativeCacheMaxTTL {
 			cachedTTL = negativeCacheMaxTTL
 		}
@@ -772,11 +783,12 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			dns64Prefix, dns64Active = p.activeDNS64Prefix()
 		}
 		now := time.Now()
-		for i, upstream := range upstreams {
-			var upstreamCfg *ctrld.UpstreamConfig
-			if i < len(upstreamConfigs) {
-				upstreamCfg = upstreamConfigs[i]
-			}
+		refreshUpstream := upstreams[0]
+		var refreshCfg *ctrld.UpstreamConfig
+		if len(upstreamConfigs) > 0 {
+			refreshCfg = upstreamConfigs[0]
+		}
+		for _, upstream := range upstreams {
 			answer, stale, hit, dns64Hit, dns64Bypass := p.cachedResponse(req.msg, upstream, dns64Prefix, dns64Active, now)
 			if stale != nil {
 				staleAnswer = stale
@@ -793,7 +805,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 						ctrld.Log(ctx, mainLog.Load().Debug(), "serving stale-while-revalidate cached response")
 						p.health.countCacheHit()
 						setCachedAnswerTTL(stale, now, now.Add(staleTTL))
-						p.refreshCacheAsync(req, upstream, upstreamCfg)
+						p.refreshCacheAsync(req, refreshUpstream, refreshCfg)
 						res.answer = stale
 						res.cached = true
 						return res
@@ -802,7 +814,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				continue
 			}
 			if exp, ok := p.cachedExpireTime(req.msg, upstream, dns64Prefix, dns64Active); ok && exp.Sub(now) <= prefetchThreshold {
-				p.refreshCacheAsync(req, upstream, upstreamCfg)
+				p.refreshCacheAsync(req, refreshUpstream, refreshCfg)
 			}
 			if dns64Hit {
 				ctrld.Log(ctx, mainLog.Load().Debug(), "dns64: hit cached response variant")
@@ -1109,7 +1121,11 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		answer.Compress = true
 
 		if cacheable {
-			p.addCachedResponse(dnscache.NewKey(req.msg, upstreams[n]), answer)
+			maxTTL := uint32(0)
+			if n > 0 {
+				maxTTL = fallbackCacheMaxTTL
+			}
+			p.addCachedResponseWithMaxTTL(dnscache.NewKey(req.msg, upstreams[n]), answer, maxTTL)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "add cached response")
 		}
 		hostname := ""
