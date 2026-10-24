@@ -632,6 +632,18 @@ func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg
 		})
 		return answer
 	}
+	// Never leak unresolvable .lan, .local, or .home.arpa queries to WAN upstreams.
+	// Terminate locally with an authoritative NXDOMAIN response.
+	lower := strings.ToLower(hostname)
+	if strings.HasSuffix(lower, ".lan") || strings.HasSuffix(lower, ".local") || strings.HasSuffix(lower, ".home.arpa") {
+		answer := new(dns.Msg)
+		answer.SetRcode(msg, dns.RcodeNameError)
+		answer.Authoritative = true
+		answer.RecursionAvailable = true
+		answer.Compress = true
+		ctrld.Log(ctx, mainLog.Load().Info(), "lan hostname query %s not found in client info table, returning local NXDOMAIN", q.Name)
+		return answer
+	}
 	return nil
 }
 
