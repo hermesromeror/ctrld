@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	"github.com/Control-D-Inc/ctrld/testhelper"
 )
@@ -921,6 +922,47 @@ func Test_sameQuestion(t *testing.T) {
 			if got := sameQuestion(tc.req, tc.answer); got != tc.want {
 				t.Errorf("sameQuestion() = %v, want %v", got, tc.want)
 			}
+		})
+	}
+}
+
+func Test_proxyLanHostnameQuery_NXDOMAIN_SOA(t *testing.T) {
+	p := &prog{
+		ciTable: clientinfo.NewTable(&ctrld.Config{}, "", "", nil),
+	}
+	tests := []struct {
+		name      string
+		qname     string
+		wantZone  string
+		wantSOA   bool
+		wantRcode int
+	}{
+		{"wpad.lan", "wpad.lan.", "lan.", true, dns.RcodeNameError},
+		{"printer.local", "printer.local.", "local.", true, dns.RcodeNameError},
+		{"nas.home.arpa", "nas.home.arpa.", "home.arpa.", true, dns.RcodeNameError},
+		{"google.com", "google.com.", "", false, 0},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			m := new(dns.Msg)
+			m.SetQuestion(tc.qname, dns.TypeA)
+			resp := p.proxyLanHostnameQuery(context.Background(), m)
+			if !tc.wantSOA {
+				assert.Nil(t, resp)
+				return
+			}
+			require.NotNil(t, resp)
+			assert.Equal(t, tc.wantRcode, resp.Rcode)
+			assert.True(t, resp.Authoritative)
+			require.Len(t, resp.Ns, 1)
+			soa, ok := resp.Ns[0].(*dns.SOA)
+			require.True(t, ok)
+			assert.Equal(t, tc.wantZone, soa.Hdr.Name)
+			assert.Equal(t, uint32(300), soa.Hdr.Ttl)
+			assert.Equal(t, "firewalla."+tc.wantZone, soa.Ns)
+			assert.Equal(t, "hostmaster.firewalla."+tc.wantZone, soa.Mbox)
+			assert.Equal(t, uint32(300), soa.Minttl)
 		})
 	}
 }

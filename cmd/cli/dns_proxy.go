@@ -652,6 +652,27 @@ func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg
 		answer.Authoritative = true
 		answer.RecursionAvailable = true
 		answer.Compress = true
+		soaZone := "lan."
+		if strings.HasSuffix(lower, ".local") {
+			soaZone = "local."
+		} else if strings.HasSuffix(lower, ".home.arpa") {
+			soaZone = "home.arpa."
+		}
+		answer.Ns = []dns.RR{&dns.SOA{
+			Hdr: dns.RR_Header{
+				Name:   soaZone,
+				Rrtype: dns.TypeSOA,
+				Class:  dns.ClassINET,
+				Ttl:    300,
+			},
+			Ns:      "firewalla." + soaZone,
+			Mbox:    "hostmaster.firewalla." + soaZone,
+			Serial:  1,
+			Refresh: 300,
+			Retry:   60,
+			Expire:  86400,
+			Minttl:  300,
+		}}
 		ctrld.Log(ctx, mainLog.Load().Info(), "lan hostname query %s not found in client info table, returning local NXDOMAIN", q.Name)
 		return answer
 	}
@@ -795,7 +816,10 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			dns64Prefix, dns64Active = p.activeDNS64Prefix()
 		}
 		now := time.Now()
-		refreshUpstream := upstreams[0]
+		var refreshUpstream string
+		if len(upstreams) > 0 {
+			refreshUpstream = upstreams[0]
+		}
 		var refreshCfg *ctrld.UpstreamConfig
 		if len(upstreamConfigs) > 0 {
 			refreshCfg = upstreamConfigs[0]
@@ -817,7 +841,9 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 						ctrld.Log(ctx, mainLog.Load().Debug(), "serving stale-while-revalidate cached response")
 						p.health.countCacheHit()
 						setCachedAnswerTTL(stale, now, now.Add(staleTTL))
-						p.refreshCacheAsync(req, refreshUpstream, refreshCfg)
+						if refreshUpstream != "" {
+							p.refreshCacheAsync(req, refreshUpstream, refreshCfg)
+						}
 						res.answer = stale
 						res.cached = true
 						return res
@@ -826,7 +852,9 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				continue
 			}
 			if exp, ok := p.cachedExpireTime(req.msg, upstream, dns64Prefix, dns64Active); ok && exp.Sub(now) <= prefetchThreshold {
-				p.refreshCacheAsync(req, refreshUpstream, refreshCfg)
+				if refreshUpstream != "" {
+					p.refreshCacheAsync(req, refreshUpstream, refreshCfg)
+				}
 			}
 			if dns64Hit {
 				ctrld.Log(ctx, mainLog.Load().Debug(), "dns64: hit cached response variant")
@@ -991,7 +1019,11 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		if upstreamConfig.UpstreamSendClientInfo() && req.ci != nil {
 			clientKey = req.ci.Mac + "|" + req.ci.IP + "|" + req.ci.Hostname
 		}
-		sfKey := fmt.Sprintf("%s|%d|%d|%s|%s|%s|do:%t|cd:%t", upstream, q.Qtype, q.Qclass, strings.ToLower(q.Name), dnscache.CanonicalECS(msg), clientKey, msg.CheckingDisabled, msg.AuthenticatedData)
+		doBit := false
+		if opt := msg.IsEdns0(); opt != nil {
+			doBit = opt.Do()
+		}
+		sfKey := fmt.Sprintf("%s|%d|%d|%s|%s|%s|cd:%t|ad:%t|do:%t", upstream, q.Qtype, q.Qclass, strings.ToLower(q.Name), dnscache.CanonicalECS(msg), clientKey, msg.CheckingDisabled, msg.AuthenticatedData, doBit)
 		msgCopy := msg.Copy()
 		baseCtx := context.WithoutCancel(ctx)
 		val, err, shared := p.inflightResolveGroup.Do(sfKey, func() (any, error) {
