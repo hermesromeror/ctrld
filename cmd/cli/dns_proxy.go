@@ -2018,7 +2018,7 @@ func isLanHostnameQueryMsg(m *dns.Msg, ciTable *clientinfo.Table) bool {
 func isDNSSECInfraType(t uint16) bool {
 	switch t {
 	case dns.TypeDS, dns.TypeDNSKEY, dns.TypeNSEC, dns.TypeNSEC3, dns.TypeNSEC3PARAM,
-		dns.TypeRRSIG, dns.TypeCDS, dns.TypeCDNSKEY, dns.TypeNS, dns.TypeSOA:
+		dns.TypeRRSIG, dns.TypeCDS, dns.TypeCDNSKEY:
 		return true
 	}
 	return false

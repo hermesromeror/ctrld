@@ -3,8 +3,6 @@ package cli
 import (
 	"context"
 	"net"
-	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -809,15 +807,10 @@ func Test_isLanHostnameQuery(t *testing.T) {
 }
 
 func Test_isLanHostnameQuery_withCiTable(t *testing.T) {
-	leaseFile := filepath.Join(t.TempDir(), "dnsmasq.leases")
-	leaseContent := "1683329857 e6:20:59:b8:c1:6d 192.168.20.87 book2-pao *\n" +
-		"1683329858 e6:20:59:b8:c1:6e 192.168.20.95 com *\n" +
-		"1683329859 e6:20:59:b8:c1:6f 192.168.20.99 wpad *\n"
-	err := os.WriteFile(leaseFile, []byte(leaseContent), 0644)
-	require.NoError(t, err)
 	table := clientinfo.NewTable(&ctrld.Config{}, "", "", nil)
-	table.AddLeaseFile(leaseFile, ctrld.Dnsmasq)
-	table.Init()
+	table.StoreDHCPForTest("192.168.20.87", "book2-pao")
+	table.StoreDHCPForTest("192.168.20.95", "com")
+	table.StoreDHCPForTest("192.168.20.99", "wpad")
 
 	tests := []struct {
 		name string
@@ -828,12 +821,16 @@ func Test_isLanHostnameQuery_withCiTable(t *testing.T) {
 		{"existing dotless AAAA", newDnsMsgWithHostname("book2-pao", dns.TypeAAAA), true},
 		{"existing dotless TXT", newDnsMsgWithHostname("book2-pao", dns.TypeTXT), true},
 		{"existing dotless MX", newDnsMsgWithHostname("book2-pao", dns.TypeMX), true},
+		{"existing dotless NS", newDnsMsgWithHostname("book2-pao", dns.TypeNS), true},
+		{"existing dotless SOA", newDnsMsgWithHostname("book2-pao", dns.TypeSOA), true},
 		{"existing dotless HTTPS", newDnsMsgWithHostname("book2-pao", 65), true},
 		{"non-existing dotless TXT", newDnsMsgWithHostname("notexist", dns.TypeTXT), false},
 		{"non-existing dotless MX", newDnsMsgWithHostname("notexist", dns.TypeMX), false},
 		{"non-existing dotless HTTPS", newDnsMsgWithHostname("wpad", 65), true},
 		{"com DS passthrough", newDnsMsgWithHostname("com", dns.TypeDS), false},
 		{"com DNSKEY passthrough", newDnsMsgWithHostname("com", dns.TypeDNSKEY), false},
+		{"com NS passthrough", newDnsMsgWithHostname("com", dns.TypeNS), false},
+		{"com SOA passthrough", newDnsMsgWithHostname("com", dns.TypeSOA), false},
 		{"existing dotless 'com' DS passthrough", newDnsMsgWithHostname("com", dns.TypeDS), false},
 		{"existing dotless 'com' DNSKEY passthrough", newDnsMsgWithHostname("com", dns.TypeDNSKEY), false},
 		{"existing dotless 'com' NS passthrough", newDnsMsgWithHostname("com", dns.TypeNS), false},
@@ -1059,12 +1056,8 @@ func Test_proxyPrivatePtrLookup_NXDOMAIN_SOA(t *testing.T) {
 }
 
 func Test_proxyLanHostnameQuery_ExistingHost_v310(t *testing.T) {
-	leaseFile := filepath.Join(t.TempDir(), "dnsmasq.leases")
-	err := os.WriteFile(leaseFile, []byte("1683329857 e6:20:59:b8:c1:6d 192.168.20.87 book2-pao *\n"), 0644)
-	require.NoError(t, err)
 	table := clientinfo.NewTable(&ctrld.Config{}, "", "", nil)
-	table.AddLeaseFile(leaseFile, ctrld.Dnsmasq)
-	table.Init()
+	table.StoreDHCPForTest("192.168.20.87", "book2-pao")
 
 	p := &prog{
 		ciTable: table,
@@ -1113,4 +1106,32 @@ func Test_proxyLanHostnameQuery_ExistingHost_v310(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "book2-pao.", ptrRecord.Ptr)
 	assert.Equal(t, uint32(60), ptrRecord.Hdr.Ttl)
+
+	// 4. Existing host dotless NS query: book2-pao NS -> NODATA with SOA lan.
+	mNS := new(dns.Msg)
+	mNS.SetQuestion("book2-pao.", dns.TypeNS)
+	respNS := p.proxyLanHostnameQuery(context.Background(), mNS)
+	require.NotNil(t, respNS)
+	assert.Equal(t, dns.RcodeSuccess, respNS.Rcode)
+	assert.True(t, respNS.Authoritative)
+	assert.True(t, respNS.RecursionAvailable)
+	assert.Empty(t, respNS.Answer)
+	require.Len(t, respNS.Ns, 1)
+	soaNS, ok := respNS.Ns[0].(*dns.SOA)
+	require.True(t, ok)
+	assert.Equal(t, "lan.", soaNS.Hdr.Name)
+
+	// 5. Existing host dotless SOA query: book2-pao SOA -> NODATA with SOA lan.
+	mSOA := new(dns.Msg)
+	mSOA.SetQuestion("book2-pao.", dns.TypeSOA)
+	respSOA := p.proxyLanHostnameQuery(context.Background(), mSOA)
+	require.NotNil(t, respSOA)
+	assert.Equal(t, dns.RcodeSuccess, respSOA.Rcode)
+	assert.True(t, respSOA.Authoritative)
+	assert.True(t, respSOA.RecursionAvailable)
+	assert.Empty(t, respSOA.Answer)
+	require.Len(t, respSOA.Ns, 1)
+	soaSOA, ok := respSOA.Ns[0].(*dns.SOA)
+	require.True(t, ok)
+	assert.Equal(t, "lan.", soaSOA.Hdr.Name)
 }

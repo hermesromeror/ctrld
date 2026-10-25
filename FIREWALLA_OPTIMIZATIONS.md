@@ -1,8 +1,8 @@
 # Resumen de Optimizaciones y Features en `ctrld` (Firewalla Gold)
-**Versión Activa:** `ctrld v1.5.8+patched-v3.11-minmem`  
+**Versión Activa:** `ctrld v1.5.8+patched-v3.12-minmem`  
 **Dispositivo:** Firewalla Gold (FWG) - Intel Celeron J4125 (Gemini Lake, x86_64 GOAMD64=v2)  
 **Fecha de Actualización:** 25 de Octubre, 2026  
-**Rama Git:** `firewalla-v3.11-minmem` (https://github.com/hermesromeror/ctrld)  
+**Rama Git:** `firewalla-v3.12-minmem` (https://github.com/hermesromeror/ctrld)  
 
 
 ---
@@ -199,7 +199,14 @@ El binario `v3.2-minmem` incorpora y preserva integralmente los arreglos de esta
 * **Búsqueda Canónica Dual en `LookupIPByHostname`:**
   * `Table.LookupIPByHostname` ahora normaliza el hostname recibido y busca tanto el nombre calificado como el nombre base sin sufijos locales (`.lan`, `.local`, `.home.arpa`, `.domain`), unificando la resolución en todas las fuentes de descubrimiento (DHCP leases, hostsfile, mDNS, Firewalla).
 * **Compilación Optimizada:**
-  * Target Celeron J4125: `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v2` con build flag `v1.5.8+patched-v3.11-minmem`.
+  * Target Celeron J4125: `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v2` con build flag `v1.5.8+patched-v3.12-minmem`.
+
+### Ajustes en v3.12 (`v1.5.8+patched-v3.12-minmem`)
+* **Corrección de `NS` y `SOA` en Dotless Existente:**
+  * Se removieron `dns.TypeNS` y `dns.TypeSOA` de `isDNSSECInfraType`. De este modo, consultas como `book2-pao NS` y `book2-pao SOA` de hosts locales existentes se capturan localmente respondiendo `NOERROR` autoritativo sintético (`NODATA RFC 2308` con SOA `lan.` en 0 ms), eliminando fugas al WAN y mitigando el riesgo de corte RFC 8020 en clientes Windows.
+  * Consultas a TLDs (`com NS`, `com SOA`) siguen pasando incondicionalmente a upstream gracias a que `com` está en la lista de nombres reservados y no resuelve en fuentes no confiables.
+* **Portabilidad Cross-Platform de Pruebas Unitarias:**
+  * Se implementó `Table.StoreDHCPForTest` para la inicialización in-memory de clientes DHCP en pruebas unitarias, desacoplándolas de archivos temporales de leases en disco y garantizando ejecución idéntica en Windows, Linux y macOS.
 
 ### Mejoras de Seguridad en v3.11 (`v1.5.8+patched-v3.11-minmem`)
 * **Protección contra Secuestro WPAD/ISATAP en Fuentes no Confiables:**

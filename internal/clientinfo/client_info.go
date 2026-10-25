@@ -122,6 +122,17 @@ func (t *Table) AddLeaseFile(name string, format ctrld.LeaseFileFormat) {
 	clientInfoFiles[name] = format
 }
 
+// StoreDHCPForTest injects an IP and hostname mapping directly into Table's DHCP finder for tests.
+func (t *Table) StoreDHCPForTest(ip, name string) {
+	if t == nil {
+		return
+	}
+	if t.dhcp == nil {
+		t.dhcp = &dhcp{}
+	}
+	t.dhcp.ip2name.Store(ip, name)
+}
+
 // RefreshLoop runs all the refresher to update new client info data.
 func (t *Table) RefreshLoop(ctx context.Context) {
 	timer := time.NewTicker(time.Second * time.Duration(t.refreshInterval))
@@ -182,7 +193,9 @@ func (t *Table) SetSelfIP(ip string) {
 
 // initSelfDiscover initializes necessary client metadata for self query.
 func (t *Table) initSelfDiscover() {
-	t.dhcp = &dhcp{selfIP: t.selfIP}
+	if t.dhcp == nil {
+		t.dhcp = &dhcp{selfIP: t.selfIP}
+	}
 	t.dhcp.addSelf()
 	t.ipResolvers = append(t.ipResolvers, t.dhcp)
 	t.macResolvers = append(t.macResolvers, t.dhcp)
@@ -245,7 +258,9 @@ func (t *Table) init() {
 	}
 	// DHCP lease files.
 	if t.discoverDHCP() {
-		t.dhcp = &dhcp{selfIP: t.selfIP}
+		if t.dhcp == nil {
+			t.dhcp = &dhcp{selfIP: t.selfIP}
+		}
 		ctrld.ProxyLogger.Load().Debug().Msg("start dhcp discovery")
 		if err := t.dhcp.init(); err != nil {
 			ctrld.ProxyLogger.Load().Error().Err(err).Msg("could not init DHCP discover")
