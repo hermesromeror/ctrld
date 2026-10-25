@@ -574,7 +574,7 @@ macRules:
 
 func (p *prog) proxyPrivatePtrLookup(ctx context.Context, msg *dns.Msg) *dns.Msg {
 	cDomainName := msg.Question[0].Name
-	if p.cfg.Service.DiscoverPtr == nil || *p.cfg.Service.DiscoverPtr {
+	if p.ptrLoopGuard != nil && (p.cfg == nil || p.cfg.Service.DiscoverPtr == nil || *p.cfg.Service.DiscoverPtr) {
 		locked := p.ptrLoopGuard.TryLock(cDomainName)
 		defer p.ptrLoopGuard.Unlock(cDomainName)
 		if !locked {
@@ -603,18 +603,62 @@ func (p *prog) proxyPrivatePtrLookup(ctx context.Context, msg *dns.Msg) *dns.Msg
 		})
 		return answer
 	}
-	return nil
+	// Never leak unresolvable RFC 1918 / private PTR queries to WAN upstreams (RFC 6303).
+	// Terminate locally with an authoritative NXDOMAIN response.
+	answer := new(dns.Msg)
+	answer.SetRcode(msg, dns.RcodeNameError)
+	answer.Authoritative = true
+	answer.RecursionAvailable = true
+	answer.Compress = true
+	soaZone := "in-addr.arpa."
+	lower := strings.ToLower(cDomainName)
+	if strings.HasSuffix(lower, ".ip6.arpa.") || strings.HasSuffix(lower, ".ip6.arpa") {
+		soaZone = "ip6.arpa."
+	}
+	answer.Ns = []dns.RR{&dns.SOA{
+		Hdr: dns.RR_Header{
+			Name:   soaZone,
+			Rrtype: dns.TypeSOA,
+			Class:  dns.ClassINET,
+			Ttl:    60,
+		},
+		Ns:      "firewalla.lan.",
+		Mbox:    "hostmaster.firewalla.lan.",
+		Serial:  1,
+		Refresh: 60,
+		Retry:   30,
+		Expire:  86400,
+		Minttl:  60,
+	}}
+	ctrld.Log(ctx, mainLog.Load().Info(), "private PTR lookup %s not found in client info table, returning local NXDOMAIN", cDomainName)
+	return answer
 }
 
 func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg {
+	if p.ciTable == nil || len(msg.Question) == 0 {
+		return nil
+	}
 	q := msg.Question[0]
 	hostname := strings.TrimSuffix(q.Name, ".")
-	if ip := p.ciTable.LookupIPByHostname(hostname, q.Qtype == dns.TypeAAAA); ip != nil {
+	lower := strings.ToLower(hostname)
+	isLanSuffix := strings.HasSuffix(lower, ".lan") ||
+		strings.HasSuffix(lower, ".local") ||
+		strings.HasSuffix(lower, ".home.arpa") ||
+		strings.HasSuffix(lower, ".domain")
+	isSingleLabel := !strings.Contains(lower, ".")
+
+	if !isLanSuffix && !isSingleLabel {
+		return nil
+	}
+
+	ip := p.ciTable.LookupIPByHostname(hostname, q.Qtype == dns.TypeAAAA)
+	if ip != nil {
 		answer := new(dns.Msg)
 		answer.SetReply(msg)
 		answer.Compress = true
+		answer.Authoritative = true
 		switch {
-		case ip.Is4():
+		case ip.Is4() && q.Qtype == dns.TypeA:
 			answer.Answer = []dns.RR{&dns.A{
 				Hdr: dns.RR_Header{
 					Name:   msg.Question[0].Name,
@@ -624,7 +668,7 @@ func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg
 				},
 				A: ip.AsSlice(),
 			}}
-		case ip.Is6():
+		case ip.Is6() && q.Qtype == dns.TypeAAAA:
 			answer.Answer = []dns.RR{&dns.AAAA{
 				Hdr: dns.RR_Header{
 					Name:   msg.Question[0].Name,
@@ -643,40 +687,69 @@ func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg
 		})
 		return answer
 	}
-	// Never leak unresolvable .lan, .local, or .home.arpa queries to WAN upstreams.
-	// Terminate locally with an authoritative NXDOMAIN response.
-	lower := strings.ToLower(hostname)
-	if strings.HasSuffix(lower, ".lan") || strings.HasSuffix(lower, ".local") || strings.HasSuffix(lower, ".home.arpa") {
+
+	soaZone := "lan."
+	if strings.HasSuffix(lower, ".local") {
+		soaZone = "local."
+	} else if strings.HasSuffix(lower, ".home.arpa") {
+		soaZone = "home.arpa."
+	} else if strings.HasSuffix(lower, ".domain") {
+		soaZone = "domain."
+	}
+
+	// Check if the host exists in the table under another record type (e.g. IPv4 exists but query is AAAA, or query is HTTPS/MX/TXT).
+	ipAlt := p.ciTable.LookupIPByHostname(hostname, q.Qtype != dns.TypeAAAA)
+	if ipAlt != nil {
+		// Host exists locally, but has no data for the requested RR type (NODATA / RFC 2308).
 		answer := new(dns.Msg)
-		answer.SetRcode(msg, dns.RcodeNameError)
+		answer.SetReply(msg)
 		answer.Authoritative = true
 		answer.RecursionAvailable = true
 		answer.Compress = true
-		soaZone := "lan."
-		if strings.HasSuffix(lower, ".local") {
-			soaZone = "local."
-		} else if strings.HasSuffix(lower, ".home.arpa") {
-			soaZone = "home.arpa."
-		}
 		answer.Ns = []dns.RR{&dns.SOA{
 			Hdr: dns.RR_Header{
 				Name:   soaZone,
 				Rrtype: dns.TypeSOA,
 				Class:  dns.ClassINET,
-				Ttl:    300,
+				Ttl:    60,
 			},
 			Ns:      "firewalla." + soaZone,
 			Mbox:    "hostmaster.firewalla." + soaZone,
 			Serial:  1,
-			Refresh: 300,
-			Retry:   60,
+			Refresh: 60,
+			Retry:   30,
 			Expire:  86400,
-			Minttl:  300,
+			Minttl:  60,
 		}}
-		ctrld.Log(ctx, mainLog.Load().Info(), "lan hostname query %s not found in client info table, returning local NXDOMAIN", q.Name)
+		ctrld.Log(ctx, mainLog.Load().Info(), "lan hostname query %s exists in client info table, returning local NODATA for type %d", q.Name, q.Qtype)
 		return answer
 	}
-	return nil
+
+	// Host does NOT exist in client info table.
+	// Never leak unresolvable .lan, .local, .home.arpa, .domain, or single-label queries to WAN upstreams.
+	// Terminate locally with an authoritative NXDOMAIN response with synthetic SOA (RFC 2308 / RFC 7085).
+	answer := new(dns.Msg)
+	answer.SetRcode(msg, dns.RcodeNameError)
+	answer.Authoritative = true
+	answer.RecursionAvailable = true
+	answer.Compress = true
+	answer.Ns = []dns.RR{&dns.SOA{
+		Hdr: dns.RR_Header{
+			Name:   soaZone,
+			Rrtype: dns.TypeSOA,
+			Class:  dns.ClassINET,
+			Ttl:    60,
+		},
+		Ns:      "firewalla." + soaZone,
+		Mbox:    "hostmaster.firewalla." + soaZone,
+		Serial:  1,
+		Refresh: 60,
+		Retry:   30,
+		Expire:  86400,
+		Minttl:  60,
+	}}
+	ctrld.Log(ctx, mainLog.Load().Info(), "lan hostname query %s not found in client info table, returning local NXDOMAIN", q.Name)
+	return answer
 }
 
 func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
@@ -1841,15 +1914,13 @@ func isPrivatePtrLookup(m *dns.Msg) bool {
 	return false
 }
 
-// isLanHostnameQuery reports whether DNS message is an A/AAAA query with LAN hostname.
+// isLanHostnameQuery reports whether DNS message is a query for a LAN hostname.
 func isLanHostnameQuery(m *dns.Msg) bool {
 	if m == nil || len(m.Question) == 0 {
 		return false
 	}
 	q := m.Question[0]
-	switch q.Qtype {
-	case dns.TypeA, dns.TypeAAAA:
-	default:
+	if q.Qtype == dns.TypeSRV {
 		return false
 	}
 	return isLanHostname(q.Name)
@@ -1866,7 +1937,7 @@ func isSrvLanLookup(m *dns.Msg) bool {
 
 // isLanHostname reports whether name is a LAN hostname.
 func isLanHostname(name string) bool {
-	name = strings.TrimSuffix(name, ".")
+	name = strings.ToLower(strings.TrimSuffix(name, "."))
 	return !strings.Contains(name, ".") ||
 		strings.HasSuffix(name, ".domain") ||
 		strings.HasSuffix(name, ".lan") ||

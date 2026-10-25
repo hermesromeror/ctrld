@@ -779,7 +779,10 @@ func Test_isLanHostnameQuery(t *testing.T) {
 		{"AAAA", newDnsMsgWithHostname("foo", dns.TypeAAAA), true},
 		{"A not LAN", newDnsMsgWithHostname("example.com", dns.TypeA), false},
 		{"AAAA not LAN", newDnsMsgWithHostname("example.com", dns.TypeAAAA), false},
-		{"Not A or AAAA", newDnsMsgWithHostname("foo", dns.TypeTXT), false},
+		{"TXT lan", newDnsMsgWithHostname("foo", dns.TypeTXT), true},
+		{"SRV excluded", newDnsMsgWithHostname("foo", dns.TypeSRV), false},
+		{"HTTPS lan", newDnsMsgWithHostname("foo.lan", 65), true},
+		{"UPPERCASE", newDnsMsgWithHostname("WPAD.LAN", dns.TypeA), true},
 		{".domain", newDnsMsgWithHostname("foo.domain", dns.TypeA), true},
 		{".lan", newDnsMsgWithHostname("foo.lan", dns.TypeA), true},
 		{".local", newDnsMsgWithHostname("foo.local", dns.TypeA), true},
@@ -934,20 +937,24 @@ func Test_proxyLanHostnameQuery_NXDOMAIN_SOA(t *testing.T) {
 	tests := []struct {
 		name      string
 		qname     string
+		qtype     uint16
 		wantZone  string
 		wantSOA   bool
 		wantRcode int
 	}{
-		{"wpad.lan", "wpad.lan.", "lan.", true, dns.RcodeNameError},
-		{"printer.local", "printer.local.", "local.", true, dns.RcodeNameError},
-		{"nas.home.arpa", "nas.home.arpa.", "home.arpa.", true, dns.RcodeNameError},
-		{"google.com", "google.com.", "", false, 0},
+		{"wpad.lan", "wpad.lan.", dns.TypeA, "lan.", true, dns.RcodeNameError},
+		{"WPAD.LAN uppercase", "WPAD.LAN.", dns.TypeA, "lan.", true, dns.RcodeNameError},
+		{"wpad single-label", "wpad.", dns.TypeA, "lan.", true, dns.RcodeNameError},
+		{"wpad.lan HTTPS", "wpad.lan.", 65, "lan.", true, dns.RcodeNameError},
+		{"printer.local", "printer.local.", dns.TypeA, "local.", true, dns.RcodeNameError},
+		{"nas.home.arpa", "nas.home.arpa.", dns.TypeA, "home.arpa.", true, dns.RcodeNameError},
+		{"google.com", "google.com.", dns.TypeA, "", false, 0},
 	}
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			m := new(dns.Msg)
-			m.SetQuestion(tc.qname, dns.TypeA)
+			m.SetQuestion(tc.qname, tc.qtype)
 			resp := p.proxyLanHostnameQuery(context.Background(), m)
 			if !tc.wantSOA {
 				assert.Nil(t, resp)
@@ -960,10 +967,32 @@ func Test_proxyLanHostnameQuery_NXDOMAIN_SOA(t *testing.T) {
 			soa, ok := resp.Ns[0].(*dns.SOA)
 			require.True(t, ok)
 			assert.Equal(t, tc.wantZone, soa.Hdr.Name)
-			assert.Equal(t, uint32(300), soa.Hdr.Ttl)
+			assert.Equal(t, uint32(60), soa.Hdr.Ttl)
 			assert.Equal(t, "firewalla."+tc.wantZone, soa.Ns)
 			assert.Equal(t, "hostmaster.firewalla."+tc.wantZone, soa.Mbox)
-			assert.Equal(t, uint32(300), soa.Minttl)
+			assert.Equal(t, uint32(60), soa.Minttl)
 		})
 	}
+}
+
+func Test_proxyPrivatePtrLookup_NXDOMAIN_SOA(t *testing.T) {
+	p := &prog{
+		cfg:          &ctrld.Config{},
+		ptrLoopGuard: newLoopGuard(),
+		ciTable:      clientinfo.NewTable(&ctrld.Config{}, "", "", nil),
+	}
+	m := new(dns.Msg)
+	m.SetQuestion("250.250.168.192.in-addr.arpa.", dns.TypePTR)
+	resp := p.proxyPrivatePtrLookup(context.Background(), m)
+	require.NotNil(t, resp)
+	assert.Equal(t, dns.RcodeNameError, resp.Rcode)
+	assert.True(t, resp.Authoritative)
+	require.Len(t, resp.Ns, 1)
+	soa, ok := resp.Ns[0].(*dns.SOA)
+	require.True(t, ok)
+	assert.Equal(t, "in-addr.arpa.", soa.Hdr.Name)
+	assert.Equal(t, uint32(60), soa.Hdr.Ttl)
+	assert.Equal(t, "firewalla.lan.", soa.Ns)
+	assert.Equal(t, "hostmaster.firewalla.lan.", soa.Mbox)
+	assert.Equal(t, uint32(60), soa.Minttl)
 }
