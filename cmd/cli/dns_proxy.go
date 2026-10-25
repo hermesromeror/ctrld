@@ -641,6 +641,9 @@ func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg
 	q := msg.Question[0]
 	hostname := strings.TrimSuffix(q.Name, ".")
 	lower := strings.ToLower(hostname)
+	if lower == "" {
+		return nil
+	}
 	isLanSuffix := strings.HasSuffix(lower, ".lan") ||
 		strings.HasSuffix(lower, ".local") ||
 		strings.HasSuffix(lower, ".home.arpa") ||
@@ -651,41 +654,53 @@ func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg
 		return nil
 	}
 
-	ip := p.ciTable.LookupIPByHostname(hostname, q.Qtype == dns.TypeAAAA)
-	if ip != nil {
-		answer := new(dns.Msg)
-		answer.SetReply(msg)
-		answer.Compress = true
-		answer.Authoritative = true
-		switch {
-		case ip.Is4() && q.Qtype == dns.TypeA:
-			answer.Answer = []dns.RR{&dns.A{
-				Hdr: dns.RR_Header{
-					Name:   msg.Question[0].Name,
-					Rrtype: dns.TypeA,
-					Class:  dns.ClassINET,
-					Ttl:    uint32(localTTL.Seconds()),
-				},
-				A: ip.AsSlice(),
-			}}
-		case ip.Is6() && q.Qtype == dns.TypeAAAA:
-			answer.Answer = []dns.RR{&dns.AAAA{
-				Hdr: dns.RR_Header{
-					Name:   msg.Question[0].Name,
-					Rrtype: dns.TypeAAAA,
-					Class:  dns.ClassINET,
-					Ttl:    uint32(localTTL.Seconds()),
-				},
-				AAAA: ip.AsSlice(),
-			}}
+	// For dotless single-label names, only intercept host-lookup query types.
+	// Infrastructure / DNSSEC queries (DS, DNSKEY, NS, SOA, RRSIG, etc.) against TLDs (e.g. "com", "net")
+	// must pass through to upstream resolvers.
+	if isSingleLabel && !isLanSuffix {
+		switch q.Qtype {
+		case dns.TypeA, dns.TypeAAAA, 65 /* TypeHTTPS */, 64 /* TypeSVCB */:
+		default:
+			return nil
 		}
-		ctrld.Log(ctx, mainLog.Load().Info(), "lan hostname lookup, using client info table")
-		ctrld.Log(ctx, mainLog.Load().Debug(), "client info: %v", ctrld.ClientInfo{
-			Mac:      p.ciTable.LookupMac(ip.String()),
-			IP:       ip.String(),
-			Hostname: hostname,
-		})
-		return answer
+	}
+
+	if q.Qtype == dns.TypeA || q.Qtype == dns.TypeAAAA {
+		ip := p.ciTable.LookupIPByHostname(hostname, q.Qtype == dns.TypeAAAA)
+		if ip != nil && ((ip.Is4() && q.Qtype == dns.TypeA) || (ip.Is6() && q.Qtype == dns.TypeAAAA)) {
+			answer := new(dns.Msg)
+			answer.SetReply(msg)
+			answer.Compress = true
+			answer.Authoritative = true
+			if ip.Is4() && q.Qtype == dns.TypeA {
+				answer.Answer = []dns.RR{&dns.A{
+					Hdr: dns.RR_Header{
+						Name:   msg.Question[0].Name,
+						Rrtype: dns.TypeA,
+						Class:  dns.ClassINET,
+						Ttl:    uint32(localTTL.Seconds()),
+					},
+					A: ip.AsSlice(),
+				}}
+			} else if ip.Is6() && q.Qtype == dns.TypeAAAA {
+				answer.Answer = []dns.RR{&dns.AAAA{
+					Hdr: dns.RR_Header{
+						Name:   msg.Question[0].Name,
+						Rrtype: dns.TypeAAAA,
+						Class:  dns.ClassINET,
+						Ttl:    uint32(localTTL.Seconds()),
+					},
+					AAAA: ip.AsSlice(),
+				}}
+			}
+			ctrld.Log(ctx, mainLog.Load().Info(), "lan hostname lookup, using client info table")
+			ctrld.Log(ctx, mainLog.Load().Debug(), "client info: %v", ctrld.ClientInfo{
+				Mac:      p.ciTable.LookupMac(ip.String()),
+				IP:       ip.String(),
+				Hostname: hostname,
+			})
+			return answer
+		}
 	}
 
 	soaZone := "lan."
@@ -1923,7 +1938,29 @@ func isLanHostnameQuery(m *dns.Msg) bool {
 	if q.Qtype == dns.TypeSRV {
 		return false
 	}
-	return isLanHostname(q.Name)
+	name := strings.ToLower(strings.TrimSuffix(q.Name, "."))
+	if name == "" {
+		return false
+	}
+	isLanSuffix := strings.HasSuffix(name, ".domain") ||
+		strings.HasSuffix(name, ".lan") ||
+		strings.HasSuffix(name, ".local") ||
+		strings.HasSuffix(name, ".home.arpa")
+	if isLanSuffix {
+		return true
+	}
+	// For dotless single-label names (e.g. "wpad", "laptop"), only intercept host-lookup queries.
+	// Infrastructure and DNSSEC queries (DS, DNSKEY, NS, SOA, RRSIG, etc.) against TLDs (e.g. "com", "net")
+	// must pass through to upstream resolvers.
+	if !strings.Contains(name, ".") {
+		switch q.Qtype {
+		case dns.TypeA, dns.TypeAAAA, 65 /* TypeHTTPS */, 64 /* TypeSVCB */:
+			return true
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // isSrvLanLookup reports whether DNS message is an SRV query of a LAN hostname.
@@ -1938,6 +1975,9 @@ func isSrvLanLookup(m *dns.Msg) bool {
 // isLanHostname reports whether name is a LAN hostname.
 func isLanHostname(name string) bool {
 	name = strings.ToLower(strings.TrimSuffix(name, "."))
+	if name == "" {
+		return false
+	}
 	return !strings.Contains(name, ".") ||
 		strings.HasSuffix(name, ".domain") ||
 		strings.HasSuffix(name, ".lan") ||

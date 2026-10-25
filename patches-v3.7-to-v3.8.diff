@@ -1,0 +1,238 @@
+diff --git a/FIREWALLA_OPTIMIZATIONS.md b/FIREWALLA_OPTIMIZATIONS.md
+index 1433851..6e3d3ae 100644
+--- a/FIREWALLA_OPTIMIZATIONS.md
++++ b/FIREWALLA_OPTIMIZATIONS.md
+@@ -1,11 +1,9 @@
+ # Resumen de Optimizaciones y Features en `ctrld` (Firewalla Gold)
+-**Versión Activa:** `ctrld v1.5.8+patched-v3.2-minmem`  
+-**Dispositivo:** Firewalla Gold (FWG)  
+-**Fecha de Actualización:** 19 de Octubre, 2026  
+-**Archivos de Código y Parche:**  
+-* Patch Unificado: [`patches-v3.2-minmem.diff`](file:///c:/Users/herme/Documents/Antigravity/firewalla-ops/patches-v3.2-minmem.diff) (36 KB)
+-* Tarball Fuente: [`ctrld-v1.5.8-patched-v3.2-minmem-src.tar.gz`](file:///c:/Users/herme/Documents/Antigravity/firewalla-ops/ctrld-v1.5.8-patched-v3.2-minmem-src.tar.gz) (13 MB)
+-* Copias persistentes en router: `/data/controld/patches-v3.2-minmem.diff` y `/data/controld/ctrld-v1.5.8-patched-v3.2-minmem-src.tar.gz`
++**Versión Activa:** `ctrld v1.5.8+patched-v3.8-minmem`  
++**Dispositivo:** Firewalla Gold (FWG) - Intel Celeron J4125 (Gemini Lake, x86_64 GOAMD64=v2)  
++**Fecha de Actualización:** 25 de Octubre, 2026  
++**Rama Git:** `firewalla-v3.8-minmem` (https://github.com/hermesromeror/ctrld)  
++
+ 
+ ---
+ 
+@@ -144,8 +142,26 @@ El binario `v3.2-minmem` incorpora y preserva integralmente los arreglos de esta
+    * Al escanear la tabla ARP del sistema, se descartan entradas incompletas, con flags `0x0`, o con MAC fantasma (`00:00:00:00:00:00`, `*`, vacías).
+ 3. **Concurrencia segura en transporte HTTP (`config.go`):**
+    * Se incorporó `transportMu sync.Mutex` para proteger el acceso concurrente a `ensureSetupTransport()`, `dohTransport()`, `doh3Transport()`, `doqTransport()` y `dotTransport()`.
+-4. **Tuning de transporte QUIC / DoH3 (`config_quic.go`, `doh.go`):**
+-   * Se añadieron ajustes de timeouts para QUIC (`MaxIdleTimeout: 90s`, `KeepAlivePeriod: 15s`, `HandshakeIdleTimeout: 1.5s`) y reintento en conexión limpia para DoH3. *(Nota: Actualmente los 4 upstreams activos utilizan DoH sobre HTTP/2, por lo que estas rutas QUIC/DoH3 están preparadas pero inactivas en la configuración actual).*
++5. **Contención Total de Fugas LAN y PTRs Privadas (v3.7-minmem):**
++   * Normalización a minúsculas en sufijos LAN (`.lan`, `.local`, `.home.arpa`, `.domain`) evitando evasiones por mayúsculas o aleatorización 0x20.
++   * Redirección de PTRs privadas no asignadas (RFC 1918 / CGNAT) a NXDOMAIN autoritativo local con SOA conforme al RFC 6303 en 0 ms.
++   * Reducción del TTL del SOA sintético de 300s a 60s para un rápido descubrimiento de clientes nuevos.
++
++---
++
++### Feature 9: DNSSEC Passthrough en TLDs y Optimización Celeron J4125 (v3.8-minmem)
++* **Archivos:** [`cmd/cli/dns_proxy.go`](file:///home/dev/projects/firewalla/ctrld/cmd/cli/dns_proxy.go), [`cmd/cli/dns_proxy_test.go`](file:///home/dev/projects/firewalla/ctrld/cmd/cli/dns_proxy_test.go).
++* **Solución de Regresión DNSSEC:**
++  * En v3.7, la intercepción de nombres dotless (sin punto) interceptaba cualquier consulta sin punto, afectando a TLDs (`com`, `net`, `org`, `arpa`) y devolviendo NXDOMAIN para consultas de infraestructura.
++  * En v3.8, la intercepción de nombres dotless (`!strings.Contains(lower, ".")`) se restringe estrictamente a tipos de host (`A`, `AAAA`, `HTTPS`, `SVCB`).
++  * Consultas de infraestructura y DNSSEC (`DS`, `DNSKEY`, `NS`, `SOA`, `RRSIG`, `NSEC`, `NSEC3`) para TLDs pasan directamente a los resolvers upstream, permitiendo que clientes con validación DNSSEC (`systemd-resolved`, Unbound) validen la cadena de confianza sin errores.
++  * La zona raíz `.` (`name == ""`) queda excluida de intercepción local.
++* **Unificación de Respuestas NODATA:**
++  * Consultas para nombres locales existentes que carecen del tipo solicitado (ej. `book2-pao.lan HTTPS` o `TXT`) ahora generan respuestas NODATA consistentes con `NOERROR`, sección SOA sintética (TTL 60s) y flag `RecursionAvailable = true` conforme al RFC 2308.
++* **Compilación Optimizada para Hardware Firewalla Gold:**
++  * Microarquitectura: Intel Celeron J4125 (Gemini Lake / Goldmont Plus).
++  * Parámetros: `GOOS=linux`, `GOARCH=amd64`, `GOAMD64=v2` (soporte nativo de CMPXCHG16B, POPCNT, SSE4.1, SSE4.2, SSSE3 y hardware AES-NI sin instrucciones AVX).
++  * Build flags: `-trimpath -ldflags="-s -w -X github.com/Control-D-Inc/ctrld/cmd/cli.version=v1.5.8+patched-v3.8-minmem"`.
+ 
+ ---
+ 
+diff --git a/cmd/cli/dns_proxy.go b/cmd/cli/dns_proxy.go
+index dabc47d..bfa0135 100644
+--- a/cmd/cli/dns_proxy.go
++++ b/cmd/cli/dns_proxy.go
+@@ -641,6 +641,9 @@ func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg
+ 	q := msg.Question[0]
+ 	hostname := strings.TrimSuffix(q.Name, ".")
+ 	lower := strings.ToLower(hostname)
++	if lower == "" {
++		return nil
++	}
+ 	isLanSuffix := strings.HasSuffix(lower, ".lan") ||
+ 		strings.HasSuffix(lower, ".local") ||
+ 		strings.HasSuffix(lower, ".home.arpa") ||
+@@ -651,41 +654,53 @@ func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg
+ 		return nil
+ 	}
+ 
+-	ip := p.ciTable.LookupIPByHostname(hostname, q.Qtype == dns.TypeAAAA)
+-	if ip != nil {
+-		answer := new(dns.Msg)
+-		answer.SetReply(msg)
+-		answer.Compress = true
+-		answer.Authoritative = true
+-		switch {
+-		case ip.Is4() && q.Qtype == dns.TypeA:
+-			answer.Answer = []dns.RR{&dns.A{
+-				Hdr: dns.RR_Header{
+-					Name:   msg.Question[0].Name,
+-					Rrtype: dns.TypeA,
+-					Class:  dns.ClassINET,
+-					Ttl:    uint32(localTTL.Seconds()),
+-				},
+-				A: ip.AsSlice(),
+-			}}
+-		case ip.Is6() && q.Qtype == dns.TypeAAAA:
+-			answer.Answer = []dns.RR{&dns.AAAA{
+-				Hdr: dns.RR_Header{
+-					Name:   msg.Question[0].Name,
+-					Rrtype: dns.TypeAAAA,
+-					Class:  dns.ClassINET,
+-					Ttl:    uint32(localTTL.Seconds()),
+-				},
+-				AAAA: ip.AsSlice(),
+-			}}
+-		}
+-		ctrld.Log(ctx, mainLog.Load().Info(), "lan hostname lookup, using client info table")
+-		ctrld.Log(ctx, mainLog.Load().Debug(), "client info: %v", ctrld.ClientInfo{
+-			Mac:      p.ciTable.LookupMac(ip.String()),
+-			IP:       ip.String(),
+-			Hostname: hostname,
+-		})
+-		return answer
++	// For dotless single-label names, only intercept host-lookup query types.
++	// Infrastructure / DNSSEC queries (DS, DNSKEY, NS, SOA, RRSIG, etc.) against TLDs (e.g. "com", "net")
++	// must pass through to upstream resolvers.
++	if isSingleLabel && !isLanSuffix {
++		switch q.Qtype {
++		case dns.TypeA, dns.TypeAAAA, 65 /* TypeHTTPS */, 64 /* TypeSVCB */:
++		default:
++			return nil
++		}
++	}
++
++	if q.Qtype == dns.TypeA || q.Qtype == dns.TypeAAAA {
++		ip := p.ciTable.LookupIPByHostname(hostname, q.Qtype == dns.TypeAAAA)
++		if ip != nil && ((ip.Is4() && q.Qtype == dns.TypeA) || (ip.Is6() && q.Qtype == dns.TypeAAAA)) {
++			answer := new(dns.Msg)
++			answer.SetReply(msg)
++			answer.Compress = true
++			answer.Authoritative = true
++			if ip.Is4() && q.Qtype == dns.TypeA {
++				answer.Answer = []dns.RR{&dns.A{
++					Hdr: dns.RR_Header{
++						Name:   msg.Question[0].Name,
++						Rrtype: dns.TypeA,
++						Class:  dns.ClassINET,
++						Ttl:    uint32(localTTL.Seconds()),
++					},
++					A: ip.AsSlice(),
++				}}
++			} else if ip.Is6() && q.Qtype == dns.TypeAAAA {
++				answer.Answer = []dns.RR{&dns.AAAA{
++					Hdr: dns.RR_Header{
++						Name:   msg.Question[0].Name,
++						Rrtype: dns.TypeAAAA,
++						Class:  dns.ClassINET,
++						Ttl:    uint32(localTTL.Seconds()),
++					},
++					AAAA: ip.AsSlice(),
++				}}
++			}
++			ctrld.Log(ctx, mainLog.Load().Info(), "lan hostname lookup, using client info table")
++			ctrld.Log(ctx, mainLog.Load().Debug(), "client info: %v", ctrld.ClientInfo{
++				Mac:      p.ciTable.LookupMac(ip.String()),
++				IP:       ip.String(),
++				Hostname: hostname,
++			})
++			return answer
++		}
+ 	}
+ 
+ 	soaZone := "lan."
+@@ -1923,7 +1938,29 @@ func isLanHostnameQuery(m *dns.Msg) bool {
+ 	if q.Qtype == dns.TypeSRV {
+ 		return false
+ 	}
+-	return isLanHostname(q.Name)
++	name := strings.ToLower(strings.TrimSuffix(q.Name, "."))
++	if name == "" {
++		return false
++	}
++	isLanSuffix := strings.HasSuffix(name, ".domain") ||
++		strings.HasSuffix(name, ".lan") ||
++		strings.HasSuffix(name, ".local") ||
++		strings.HasSuffix(name, ".home.arpa")
++	if isLanSuffix {
++		return true
++	}
++	// For dotless single-label names (e.g. "wpad", "laptop"), only intercept host-lookup queries.
++	// Infrastructure and DNSSEC queries (DS, DNSKEY, NS, SOA, RRSIG, etc.) against TLDs (e.g. "com", "net")
++	// must pass through to upstream resolvers.
++	if !strings.Contains(name, ".") {
++		switch q.Qtype {
++		case dns.TypeA, dns.TypeAAAA, 65 /* TypeHTTPS */, 64 /* TypeSVCB */:
++			return true
++		default:
++			return false
++		}
++	}
++	return false
+ }
+ 
+ // isSrvLanLookup reports whether DNS message is an SRV query of a LAN hostname.
+@@ -1938,6 +1975,9 @@ func isSrvLanLookup(m *dns.Msg) bool {
+ // isLanHostname reports whether name is a LAN hostname.
+ func isLanHostname(name string) bool {
+ 	name = strings.ToLower(strings.TrimSuffix(name, "."))
++	if name == "" {
++		return false
++	}
+ 	return !strings.Contains(name, ".") ||
+ 		strings.HasSuffix(name, ".domain") ||
+ 		strings.HasSuffix(name, ".lan") ||
+diff --git a/cmd/cli/dns_proxy_test.go b/cmd/cli/dns_proxy_test.go
+index 3435b3e..4b89d89 100644
+--- a/cmd/cli/dns_proxy_test.go
++++ b/cmd/cli/dns_proxy_test.go
+@@ -779,14 +779,21 @@ func Test_isLanHostnameQuery(t *testing.T) {
+ 		{"AAAA", newDnsMsgWithHostname("foo", dns.TypeAAAA), true},
+ 		{"A not LAN", newDnsMsgWithHostname("example.com", dns.TypeA), false},
+ 		{"AAAA not LAN", newDnsMsgWithHostname("example.com", dns.TypeAAAA), false},
+-		{"TXT lan", newDnsMsgWithHostname("foo", dns.TypeTXT), true},
++		{"TXT lan suffix", newDnsMsgWithHostname("foo.lan", dns.TypeTXT), true},
++		{"TXT dotless single-label", newDnsMsgWithHostname("foo", dns.TypeTXT), false},
+ 		{"SRV excluded", newDnsMsgWithHostname("foo", dns.TypeSRV), false},
+-		{"HTTPS lan", newDnsMsgWithHostname("foo.lan", 65), true},
++		{"HTTPS lan suffix", newDnsMsgWithHostname("foo.lan", 65), true},
++		{"HTTPS dotless single-label", newDnsMsgWithHostname("wpad", 65), true},
+ 		{"UPPERCASE", newDnsMsgWithHostname("WPAD.LAN", dns.TypeA), true},
+ 		{".domain", newDnsMsgWithHostname("foo.domain", dns.TypeA), true},
+ 		{".lan", newDnsMsgWithHostname("foo.lan", dns.TypeA), true},
+ 		{".local", newDnsMsgWithHostname("foo.local", dns.TypeA), true},
+ 		{".home.arpa", newDnsMsgWithHostname("foo.home.arpa", dns.TypeA), true},
++		{"com DS passthrough", newDnsMsgWithHostname("com", dns.TypeDS), false},
++		{"com DNSKEY passthrough", newDnsMsgWithHostname("com", dns.TypeDNSKEY), false},
++		{"net DS passthrough", newDnsMsgWithHostname("net", dns.TypeDS), false},
++		{"arpa NS passthrough", newDnsMsgWithHostname("arpa", dns.TypeNS), false},
++		{"root NS passthrough", newDnsMsgWithHostname("", dns.TypeNS), false},
+ 	}
+ 	for _, tc := range tests {
+ 		tc := tc
+@@ -946,9 +953,15 @@ func Test_proxyLanHostnameQuery_NXDOMAIN_SOA(t *testing.T) {
+ 		{"WPAD.LAN uppercase", "WPAD.LAN.", dns.TypeA, "lan.", true, dns.RcodeNameError},
+ 		{"wpad single-label", "wpad.", dns.TypeA, "lan.", true, dns.RcodeNameError},
+ 		{"wpad.lan HTTPS", "wpad.lan.", 65, "lan.", true, dns.RcodeNameError},
++		{"wpad.lan MX", "wpad.lan.", dns.TypeMX, "lan.", true, dns.RcodeNameError},
+ 		{"printer.local", "printer.local.", dns.TypeA, "local.", true, dns.RcodeNameError},
+ 		{"nas.home.arpa", "nas.home.arpa.", dns.TypeA, "home.arpa.", true, dns.RcodeNameError},
+ 		{"google.com", "google.com.", dns.TypeA, "", false, 0},
++		{"com DS passthrough", "com.", dns.TypeDS, "", false, 0},
++		{"com DNSKEY passthrough", "com.", dns.TypeDNSKEY, "", false, 0},
++		{"net DS passthrough", "net.", dns.TypeDS, "", false, 0},
++		{"arpa NS passthrough", "arpa.", dns.TypeNS, "", false, 0},
++		{"root NS passthrough", ".", dns.TypeNS, "", false, 0},
+ 	}
+ 	for _, tc := range tests {
+ 		tc := tc

@@ -1,11 +1,9 @@
 # Resumen de Optimizaciones y Features en `ctrld` (Firewalla Gold)
-**Versión Activa:** `ctrld v1.5.8+patched-v3.2-minmem`  
-**Dispositivo:** Firewalla Gold (FWG)  
-**Fecha de Actualización:** 19 de Octubre, 2026  
-**Archivos de Código y Parche:**  
-* Patch Unificado: [`patches-v3.2-minmem.diff`](file:///c:/Users/herme/Documents/Antigravity/firewalla-ops/patches-v3.2-minmem.diff) (36 KB)
-* Tarball Fuente: [`ctrld-v1.5.8-patched-v3.2-minmem-src.tar.gz`](file:///c:/Users/herme/Documents/Antigravity/firewalla-ops/ctrld-v1.5.8-patched-v3.2-minmem-src.tar.gz) (13 MB)
-* Copias persistentes en router: `/data/controld/patches-v3.2-minmem.diff` y `/data/controld/ctrld-v1.5.8-patched-v3.2-minmem-src.tar.gz`
+**Versión Activa:** `ctrld v1.5.8+patched-v3.8-minmem`  
+**Dispositivo:** Firewalla Gold (FWG) - Intel Celeron J4125 (Gemini Lake, x86_64 GOAMD64=v2)  
+**Fecha de Actualización:** 25 de Octubre, 2026  
+**Rama Git:** `firewalla-v3.8-minmem` (https://github.com/hermesromeror/ctrld)  
+
 
 ---
 
@@ -144,8 +142,26 @@ El binario `v3.2-minmem` incorpora y preserva integralmente los arreglos de esta
    * Al escanear la tabla ARP del sistema, se descartan entradas incompletas, con flags `0x0`, o con MAC fantasma (`00:00:00:00:00:00`, `*`, vacías).
 3. **Concurrencia segura en transporte HTTP (`config.go`):**
    * Se incorporó `transportMu sync.Mutex` para proteger el acceso concurrente a `ensureSetupTransport()`, `dohTransport()`, `doh3Transport()`, `doqTransport()` y `dotTransport()`.
-4. **Tuning de transporte QUIC / DoH3 (`config_quic.go`, `doh.go`):**
-   * Se añadieron ajustes de timeouts para QUIC (`MaxIdleTimeout: 90s`, `KeepAlivePeriod: 15s`, `HandshakeIdleTimeout: 1.5s`) y reintento en conexión limpia para DoH3. *(Nota: Actualmente los 4 upstreams activos utilizan DoH sobre HTTP/2, por lo que estas rutas QUIC/DoH3 están preparadas pero inactivas en la configuración actual).*
+5. **Contención Total de Fugas LAN y PTRs Privadas (v3.7-minmem):**
+   * Normalización a minúsculas en sufijos LAN (`.lan`, `.local`, `.home.arpa`, `.domain`) evitando evasiones por mayúsculas o aleatorización 0x20.
+   * Redirección de PTRs privadas no asignadas (RFC 1918 / CGNAT) a NXDOMAIN autoritativo local con SOA conforme al RFC 6303 en 0 ms.
+   * Reducción del TTL del SOA sintético de 300s a 60s para un rápido descubrimiento de clientes nuevos.
+
+---
+
+### Feature 9: DNSSEC Passthrough en TLDs y Optimización Celeron J4125 (v3.8-minmem)
+* **Archivos:** [`cmd/cli/dns_proxy.go`](file:///home/dev/projects/firewalla/ctrld/cmd/cli/dns_proxy.go), [`cmd/cli/dns_proxy_test.go`](file:///home/dev/projects/firewalla/ctrld/cmd/cli/dns_proxy_test.go).
+* **Solución de Regresión DNSSEC:**
+  * En v3.7, la intercepción de nombres dotless (sin punto) interceptaba cualquier consulta sin punto, afectando a TLDs (`com`, `net`, `org`, `arpa`) y devolviendo NXDOMAIN para consultas de infraestructura.
+  * En v3.8, la intercepción de nombres dotless (`!strings.Contains(lower, ".")`) se restringe estrictamente a tipos de host (`A`, `AAAA`, `HTTPS`, `SVCB`).
+  * Consultas de infraestructura y DNSSEC (`DS`, `DNSKEY`, `NS`, `SOA`, `RRSIG`, `NSEC`, `NSEC3`) para TLDs pasan directamente a los resolvers upstream, permitiendo que clientes con validación DNSSEC (`systemd-resolved`, Unbound) validen la cadena de confianza sin errores.
+  * La zona raíz `.` (`name == ""`) queda excluida de intercepción local.
+* **Unificación de Respuestas NODATA:**
+  * Consultas para nombres locales existentes que carecen del tipo solicitado (ej. `book2-pao.lan HTTPS` o `TXT`) ahora generan respuestas NODATA consistentes con `NOERROR`, sección SOA sintética (TTL 60s) y flag `RecursionAvailable = true` conforme al RFC 2308.
+* **Compilación Optimizada para Hardware Firewalla Gold:**
+  * Microarquitectura: Intel Celeron J4125 (Gemini Lake / Goldmont Plus).
+  * Parámetros: `GOOS=linux`, `GOARCH=amd64`, `GOAMD64=v2` (soporte nativo de CMPXCHG16B, POPCNT, SSE4.1, SSE4.2, SSSE3 y hardware AES-NI sin instrucciones AVX).
+  * Build flags: `-trimpath -ldflags="-s -w -X github.com/Control-D-Inc/ctrld/cmd/cli.version=v1.5.8+patched-v3.8-minmem"`.
 
 ---
 

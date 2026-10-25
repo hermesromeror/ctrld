@@ -779,14 +779,21 @@ func Test_isLanHostnameQuery(t *testing.T) {
 		{"AAAA", newDnsMsgWithHostname("foo", dns.TypeAAAA), true},
 		{"A not LAN", newDnsMsgWithHostname("example.com", dns.TypeA), false},
 		{"AAAA not LAN", newDnsMsgWithHostname("example.com", dns.TypeAAAA), false},
-		{"TXT lan", newDnsMsgWithHostname("foo", dns.TypeTXT), true},
+		{"TXT lan suffix", newDnsMsgWithHostname("foo.lan", dns.TypeTXT), true},
+		{"TXT dotless single-label", newDnsMsgWithHostname("foo", dns.TypeTXT), false},
 		{"SRV excluded", newDnsMsgWithHostname("foo", dns.TypeSRV), false},
-		{"HTTPS lan", newDnsMsgWithHostname("foo.lan", 65), true},
+		{"HTTPS lan suffix", newDnsMsgWithHostname("foo.lan", 65), true},
+		{"HTTPS dotless single-label", newDnsMsgWithHostname("wpad", 65), true},
 		{"UPPERCASE", newDnsMsgWithHostname("WPAD.LAN", dns.TypeA), true},
 		{".domain", newDnsMsgWithHostname("foo.domain", dns.TypeA), true},
 		{".lan", newDnsMsgWithHostname("foo.lan", dns.TypeA), true},
 		{".local", newDnsMsgWithHostname("foo.local", dns.TypeA), true},
 		{".home.arpa", newDnsMsgWithHostname("foo.home.arpa", dns.TypeA), true},
+		{"com DS passthrough", newDnsMsgWithHostname("com", dns.TypeDS), false},
+		{"com DNSKEY passthrough", newDnsMsgWithHostname("com", dns.TypeDNSKEY), false},
+		{"net DS passthrough", newDnsMsgWithHostname("net", dns.TypeDS), false},
+		{"arpa NS passthrough", newDnsMsgWithHostname("arpa", dns.TypeNS), false},
+		{"root NS passthrough", newDnsMsgWithHostname("", dns.TypeNS), false},
 	}
 	for _, tc := range tests {
 		tc := tc
@@ -946,9 +953,15 @@ func Test_proxyLanHostnameQuery_NXDOMAIN_SOA(t *testing.T) {
 		{"WPAD.LAN uppercase", "WPAD.LAN.", dns.TypeA, "lan.", true, dns.RcodeNameError},
 		{"wpad single-label", "wpad.", dns.TypeA, "lan.", true, dns.RcodeNameError},
 		{"wpad.lan HTTPS", "wpad.lan.", 65, "lan.", true, dns.RcodeNameError},
+		{"wpad.lan MX", "wpad.lan.", dns.TypeMX, "lan.", true, dns.RcodeNameError},
 		{"printer.local", "printer.local.", dns.TypeA, "local.", true, dns.RcodeNameError},
 		{"nas.home.arpa", "nas.home.arpa.", dns.TypeA, "home.arpa.", true, dns.RcodeNameError},
 		{"google.com", "google.com.", dns.TypeA, "", false, 0},
+		{"com DS passthrough", "com.", dns.TypeDS, "", false, 0},
+		{"com DNSKEY passthrough", "com.", dns.TypeDNSKEY, "", false, 0},
+		{"net DS passthrough", "net.", dns.TypeDS, "", false, 0},
+		{"arpa NS passthrough", "arpa.", dns.TypeNS, "", false, 0},
+		{"root NS passthrough", ".", dns.TypeNS, "", false, 0},
 	}
 	for _, tc := range tests {
 		tc := tc
