@@ -654,10 +654,18 @@ func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg
 		return nil
 	}
 
-	// For dotless single-label names, only intercept host-lookup query types.
-	// Infrastructure / DNSSEC queries (DS, DNSKEY, NS, SOA, RRSIG, etc.) against TLDs (e.g. "com", "net")
-	// must pass through to upstream resolvers.
-	if isSingleLabel && !isLanSuffix {
+	// Check if host exists in client info table (has either IPv4 or IPv6 assigned).
+	ip4 := p.ciTable.LookupIPByHostname(hostname, false)
+	ip6 := p.ciTable.LookupIPByHostname(hostname, true)
+	exists := (ip4 != nil && ip4.Is4()) || (ip6 != nil && ip6.Is6())
+
+	// For dotless single-label names:
+	// - If the host does NOT exist in ciTable, only intercept host-lookup query types (A, AAAA, HTTPS, SVCB)
+	//   to prevent LAN leaks (e.g. "wpad", "zzzqq-nope"), while allowing infrastructure/DNSSEC queries
+	//   against TLDs (e.g. "com DS", "com DNSKEY") to pass through to upstreams.
+	// - If the host DOES exist in ciTable (e.g. "book2-pao"), intercept any query type and return either
+	//   the IP or a local NODATA response, preventing unnecessary leaks to upstream for local machines.
+	if isSingleLabel && !isLanSuffix && !exists {
 		switch q.Qtype {
 		case dns.TypeA, dns.TypeAAAA, 65 /* TypeHTTPS */, 64 /* TypeSVCB */:
 		default:
@@ -665,38 +673,48 @@ func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg
 		}
 	}
 
-	if q.Qtype == dns.TypeA || q.Qtype == dns.TypeAAAA {
-		ip := p.ciTable.LookupIPByHostname(hostname, q.Qtype == dns.TypeAAAA)
-		if ip != nil && ((ip.Is4() && q.Qtype == dns.TypeA) || (ip.Is6() && q.Qtype == dns.TypeAAAA)) {
+	// 1. Host exists and requested RR type matches available IP address:
+	if exists {
+		if q.Qtype == dns.TypeA && ip4 != nil && ip4.Is4() {
 			answer := new(dns.Msg)
 			answer.SetReply(msg)
 			answer.Compress = true
 			answer.Authoritative = true
-			if ip.Is4() && q.Qtype == dns.TypeA {
-				answer.Answer = []dns.RR{&dns.A{
-					Hdr: dns.RR_Header{
-						Name:   msg.Question[0].Name,
-						Rrtype: dns.TypeA,
-						Class:  dns.ClassINET,
-						Ttl:    uint32(localTTL.Seconds()),
-					},
-					A: ip.AsSlice(),
-				}}
-			} else if ip.Is6() && q.Qtype == dns.TypeAAAA {
-				answer.Answer = []dns.RR{&dns.AAAA{
-					Hdr: dns.RR_Header{
-						Name:   msg.Question[0].Name,
-						Rrtype: dns.TypeAAAA,
-						Class:  dns.ClassINET,
-						Ttl:    uint32(localTTL.Seconds()),
-					},
-					AAAA: ip.AsSlice(),
-				}}
-			}
+			answer.Answer = []dns.RR{&dns.A{
+				Hdr: dns.RR_Header{
+					Name:   msg.Question[0].Name,
+					Rrtype: dns.TypeA,
+					Class:  dns.ClassINET,
+					Ttl:    uint32(localTTL.Seconds()),
+				},
+				A: ip4.AsSlice(),
+			}}
 			ctrld.Log(ctx, mainLog.Load().Info(), "lan hostname lookup, using client info table")
 			ctrld.Log(ctx, mainLog.Load().Debug(), "client info: %v", ctrld.ClientInfo{
-				Mac:      p.ciTable.LookupMac(ip.String()),
-				IP:       ip.String(),
+				Mac:      p.ciTable.LookupMac(ip4.String()),
+				IP:       ip4.String(),
+				Hostname: hostname,
+			})
+			return answer
+		}
+		if q.Qtype == dns.TypeAAAA && ip6 != nil && ip6.Is6() {
+			answer := new(dns.Msg)
+			answer.SetReply(msg)
+			answer.Compress = true
+			answer.Authoritative = true
+			answer.Answer = []dns.RR{&dns.AAAA{
+				Hdr: dns.RR_Header{
+					Name:   msg.Question[0].Name,
+					Rrtype: dns.TypeAAAA,
+					Class:  dns.ClassINET,
+					Ttl:    uint32(localTTL.Seconds()),
+				},
+				AAAA: ip6.AsSlice(),
+			}}
+			ctrld.Log(ctx, mainLog.Load().Info(), "lan hostname lookup, using client info table")
+			ctrld.Log(ctx, mainLog.Load().Debug(), "client info: %v", ctrld.ClientInfo{
+				Mac:      p.ciTable.LookupMac(ip6.String()),
+				IP:       ip6.String(),
 				Hostname: hostname,
 			})
 			return answer
@@ -712,10 +730,9 @@ func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg
 		soaZone = "domain."
 	}
 
-	// Check if the host exists in the table under another record type (e.g. IPv4 exists but query is AAAA, or query is HTTPS/MX/TXT).
-	ipAlt := p.ciTable.LookupIPByHostname(hostname, q.Qtype != dns.TypeAAAA)
-	if ipAlt != nil {
-		// Host exists locally, but has no data for the requested RR type (NODATA / RFC 2308).
+	// 2. Host exists, but does not have the requested record type (NODATA / RFC 2308):
+	// Returns NOERROR, Authoritative, RecursionAvailable, with synthetic SOA in Authority section.
+	if exists {
 		answer := new(dns.Msg)
 		answer.SetReply(msg)
 		answer.Authoritative = true
@@ -1935,9 +1952,6 @@ func isLanHostnameQuery(m *dns.Msg) bool {
 		return false
 	}
 	q := m.Question[0]
-	if q.Qtype == dns.TypeSRV {
-		return false
-	}
 	name := strings.ToLower(strings.TrimSuffix(q.Name, "."))
 	if name == "" {
 		return false
@@ -1948,6 +1962,9 @@ func isLanHostnameQuery(m *dns.Msg) bool {
 		strings.HasSuffix(name, ".home.arpa")
 	if isLanSuffix {
 		return true
+	}
+	if q.Qtype == dns.TypeSRV {
+		return false
 	}
 	// For dotless single-label names (e.g. "wpad", "laptop"), only intercept host-lookup queries.
 	// Infrastructure and DNSSEC queries (DS, DNSKEY, NS, SOA, RRSIG, etc.) against TLDs (e.g. "com", "net")

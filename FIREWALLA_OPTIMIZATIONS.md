@@ -1,8 +1,8 @@
 # Resumen de Optimizaciones y Features en `ctrld` (Firewalla Gold)
-**Versión Activa:** `ctrld v1.5.8+patched-v3.8-minmem`  
+**Versión Activa:** `ctrld v1.5.8+patched-v3.9-minmem`  
 **Dispositivo:** Firewalla Gold (FWG) - Intel Celeron J4125 (Gemini Lake, x86_64 GOAMD64=v2)  
 **Fecha de Actualización:** 25 de Octubre, 2026  
-**Rama Git:** `firewalla-v3.8-minmem` (https://github.com/hermesromeror/ctrld)  
+**Rama Git:** `firewalla-v3.9-minmem` (https://github.com/hermesromeror/ctrld)  
 
 
 ---
@@ -162,6 +162,25 @@ El binario `v3.2-minmem` incorpora y preserva integralmente los arreglos de esta
   * Microarquitectura: Intel Celeron J4125 (Gemini Lake / Goldmont Plus).
   * Parámetros: `GOOS=linux`, `GOARCH=amd64`, `GOAMD64=v2` (soporte nativo de CMPXCHG16B, POPCNT, SSE4.1, SSE4.2, SSSE3 y hardware AES-NI sin instrucciones AVX).
   * Build flags: `-trimpath -ldflags="-s -w -X github.com/Control-D-Inc/ctrld/cmd/cli.version=v1.5.8+patched-v3.8-minmem"`.
+
+---
+
+### Feature 10: Existencia Dual IPv4/IPv6, NODATA Canónico RFC 2308 y Prevención RFC 8020 (v3.9-minmem)
+* **Archivo:** [`cmd/cli/dns_proxy.go`](file:///home/dev/projects/firewalla/ctrld/cmd/cli/dns_proxy.go).
+* **Solución a la Regresión NODATA en Dispositivos Solo-IPv4:**
+  * En v3.8, la búsqueda de registros alternativos consultaba únicamente IPv6 (`LookupIPByHostname(hostname, true)`) para cualquier tipo distinto de AAAA (como `HTTPS`, `TXT`, `MX`), fallando en dispositivos locales solo-IPv4 (como `book2-pao.lan`) y emitiendo erróneamente `NXDOMAIN`.
+  * En v3.9, la existencia del host se verifica consultando independientemente IPv4 e IPv6:
+    ```go
+    ip4 := p.ciTable.LookupIPByHostname(hostname, false)
+    ip6 := p.ciTable.LookupIPByHostname(hostname, true)
+    exists := (ip4 != nil && ip4.Is4()) || (ip6 != nil && ip6.Is6())
+    ```
+  * Si el host existe y la consulta pide un tipo sin datos (`HTTPS`, `SVCB`, `TXT`, `MX` o `AAAA` en host solo-IPv4), se responde con `NOERROR` autoritativo, con `RecursionAvailable = true` y sección de autoridad con SOA sintético de 60s (**NODATA canónico RFC 2308**).
+  * Previene que navegadores y resolvedores que aplican **RFC 8020 ("NXDOMAIN cut")** (como Chrome, Edge o systemd-resolved) descarten el registro `A` del host tras recibir una respuesta para la consulta paralela `HTTPS`.
+* **Contención de Consultas SRV en Zonas LAN:**
+  * Consultas SRV con sufijos locales (`*.lan`, `*.local`, `*.home.arpa`, `*.domain`) se interceptan localmente en `ctrld` y se devuelven como `NXDOMAIN` (o `NODATA` si el nombre base existe), evitando fugas al upstream WAN.
+* **Compilación Optimizada:**
+  * Target Celeron J4125: `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v2` con build flag `v1.5.8+patched-v3.9-minmem`.
 
 ---
 
