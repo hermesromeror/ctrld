@@ -1,8 +1,8 @@
 # Resumen de Optimizaciones y Features en `ctrld` (Firewalla Gold)
-**Versión Activa:** `ctrld v1.5.8+patched-v3.9-minmem`  
+**Versión Activa:** `ctrld v1.5.8+patched-v3.11-minmem`  
 **Dispositivo:** Firewalla Gold (FWG) - Intel Celeron J4125 (Gemini Lake, x86_64 GOAMD64=v2)  
 **Fecha de Actualización:** 25 de Octubre, 2026  
-**Rama Git:** `firewalla-v3.9-minmem` (https://github.com/hermesromeror/ctrld)  
+**Rama Git:** `firewalla-v3.11-minmem` (https://github.com/hermesromeror/ctrld)  
 
 
 ---
@@ -199,7 +199,14 @@ El binario `v3.2-minmem` incorpora y preserva integralmente los arreglos de esta
 * **Búsqueda Canónica Dual en `LookupIPByHostname`:**
   * `Table.LookupIPByHostname` ahora normaliza el hostname recibido y busca tanto el nombre calificado como el nombre base sin sufijos locales (`.lan`, `.local`, `.home.arpa`, `.domain`), unificando la resolución en todas las fuentes de descubrimiento (DHCP leases, hostsfile, mDNS, Firewalla).
 * **Compilación Optimizada:**
-  * Target Celeron J4125: `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v2` con build flag `v1.5.8+patched-v3.10-minmem`.
+  * Target Celeron J4125: `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v2` con build flag `v1.5.8+patched-v3.11-minmem`.
+
+### Mejoras de Seguridad en v3.11 (`v1.5.8+patched-v3.11-minmem`)
+* **Protección contra Secuestro WPAD/ISATAP en Fuentes no Confiables:**
+  * En `Table.LookupIPByHostname`, se discrimina entre fuentes gestionadas por el operador (`hf` / hostsfile y `firewalla`) y fuentes no confiables anunciadas por clientes LAN (`dhcp`, `mdns`, `ptr`).
+  * Si un nombre es reservado o sensible (`wpad`, `isatap`, `gateway`, `router`, `localhost`, `com`, `net`, etc.), las fuentes no confiables son ignoradas incondicionalmente, impidiendo que un dispositivo anuncie leases maliciosos como `wpad` o `isatap` para suplantar servicios o atraer tráfico en `.lan`, `.local`, `.home.arpa`.
+* **Inmunidad Estricta de Tipos DNSSEC e Infraestructura en Nombres Dotless:**
+  * Función `isDNSSECInfraType` en `cmd/cli/dns_proxy.go`: consultas de tipos `DS`, `DNSKEY`, `NS`, `SOA`, `RRSIG`, `NSEC`, `NSEC3`, `NSEC3PARAM`, `CDS`, `CDNSKEY` sobre nombres de una sola etiqueta (TLDs como `com`, `net`, `org`, `arpa`) pasan siempre al resolver upstream WAN, garantizando la integridad de validadores DNSSEC locales incluso si un cliente registra un hostname que coincida con un TLD.
 
 ---
 

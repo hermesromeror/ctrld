@@ -335,7 +335,7 @@ func cleanFirewallaHostname(s string) string {
 // to prevent internal DNS poisoning/spoofing.
 func isReservedOrDisallowedDomain(name string) bool {
 	lower := strings.ToLower(strings.TrimSpace(name))
-	for _, suffix := range []string{".lan", ".local", ".home.arpa"} {
+	for _, suffix := range []string{".lan", ".local", ".home.arpa", ".domain"} {
 		lower = strings.TrimSuffix(lower, suffix)
 	}
 	// Extract the first label or single label
@@ -344,11 +344,13 @@ func isReservedOrDisallowedDomain(name string) bool {
 		firstLabel = lower[:idx]
 	}
 	switch firstLabel {
-	case "wpad", "isatap", "localhost", "broadcasthost", "router", "firewalla", "gateway", "dns", "ns", "proxy":
+	case "wpad", "isatap", "localhost", "broadcasthost", "router", "firewalla", "gateway", "dns", "ns", "proxy",
+		"com", "net", "org", "arpa", "edu", "gov", "mil", "int", "io", "local", "lan", "home":
 		return true
 	default:
 		switch lower {
-		case "wpad", "isatap", "localhost", "broadcasthost", "router", "firewalla", "gateway", "dns", "ns", "proxy":
+		case "wpad", "isatap", "localhost", "broadcasthost", "router", "firewalla", "gateway", "dns", "ns", "proxy",
+			"com", "net", "org", "arpa", "edu", "gov", "mil", "int", "io", "local", "lan", "home":
 			return true
 		default:
 			return false

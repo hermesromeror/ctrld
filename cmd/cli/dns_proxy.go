@@ -1984,6 +1984,12 @@ func isLanHostnameQueryMsg(m *dns.Msg, ciTable *clientinfo.Table) bool {
 	}
 	// For dotless single-label names (e.g. "wpad", "laptop", "com"):
 	if !strings.Contains(name, ".") {
+		// Infrastructure and DNSSEC queries (DS, DNSKEY, NS, SOA, RRSIG, NSEC, NSEC3, etc.)
+		// must ALWAYS pass through to upstream resolvers even if a local device announced a TLD name.
+		if isDNSSECInfraType(q.Qtype) {
+			return false
+		}
+
 		// If the host exists in the local client info table (e.g. "book2-pao"),
 		// intercept all query types so that any query (A, AAAA, TXT, MX, etc.)
 		// is answered locally (IP or NODATA) without leaking to upstream WAN.
@@ -2004,6 +2010,16 @@ func isLanHostnameQueryMsg(m *dns.Msg, ciTable *clientinfo.Table) bool {
 		default:
 			return false
 		}
+	}
+	return false
+}
+
+// isDNSSECInfraType reports whether query type is an infrastructure or DNSSEC delegation type.
+func isDNSSECInfraType(t uint16) bool {
+	switch t {
+	case dns.TypeDS, dns.TypeDNSKEY, dns.TypeNSEC, dns.TypeNSEC3, dns.TypeNSEC3PARAM,
+		dns.TypeRRSIG, dns.TypeCDS, dns.TypeCDNSKEY, dns.TypeNS, dns.TypeSOA:
+		return true
 	}
 	return false
 }

@@ -810,7 +810,10 @@ func Test_isLanHostnameQuery(t *testing.T) {
 
 func Test_isLanHostnameQuery_withCiTable(t *testing.T) {
 	leaseFile := filepath.Join(t.TempDir(), "dnsmasq.leases")
-	err := os.WriteFile(leaseFile, []byte("1683329857 e6:20:59:b8:c1:6d 192.168.20.87 book2-pao *\n"), 0644)
+	leaseContent := "1683329857 e6:20:59:b8:c1:6d 192.168.20.87 book2-pao *\n" +
+		"1683329858 e6:20:59:b8:c1:6e 192.168.20.95 com *\n" +
+		"1683329859 e6:20:59:b8:c1:6f 192.168.20.99 wpad *\n"
+	err := os.WriteFile(leaseFile, []byte(leaseContent), 0644)
 	require.NoError(t, err)
 	table := clientinfo.NewTable(&ctrld.Config{}, "", "", nil)
 	table.AddLeaseFile(leaseFile, ctrld.Dnsmasq)
@@ -831,6 +834,15 @@ func Test_isLanHostnameQuery_withCiTable(t *testing.T) {
 		{"non-existing dotless HTTPS", newDnsMsgWithHostname("wpad", 65), true},
 		{"com DS passthrough", newDnsMsgWithHostname("com", dns.TypeDS), false},
 		{"com DNSKEY passthrough", newDnsMsgWithHostname("com", dns.TypeDNSKEY), false},
+		{"existing dotless 'com' DS passthrough", newDnsMsgWithHostname("com", dns.TypeDS), false},
+		{"existing dotless 'com' DNSKEY passthrough", newDnsMsgWithHostname("com", dns.TypeDNSKEY), false},
+		{"existing dotless 'com' NS passthrough", newDnsMsgWithHostname("com", dns.TypeNS), false},
+		{"existing dotless 'com' SOA passthrough", newDnsMsgWithHostname("com", dns.TypeSOA), false},
+		{"existing dotless 'com' RRSIG passthrough", newDnsMsgWithHostname("com", dns.TypeRRSIG), false},
+		{"existing dotless 'com' NSEC passthrough", newDnsMsgWithHostname("com", dns.TypeNSEC), false},
+		{"existing dotless 'com' NSEC3 passthrough", newDnsMsgWithHostname("com", dns.TypeNSEC3), false},
+		{"untrusted lease 'wpad' TXT passthrough", newDnsMsgWithHostname("wpad", dns.TypeTXT), false},
+		{"untrusted lease 'wpad' MX passthrough", newDnsMsgWithHostname("wpad", dns.TypeMX), false},
 	}
 	for _, tc := range tests {
 		tc := tc

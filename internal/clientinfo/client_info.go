@@ -532,12 +532,26 @@ func (t *Table) LookupIPByHostname(hostname string, v6 bool) *netip.Addr {
 			break
 		}
 	}
+
+	// Traffic-attracting and sensitive names (wpad, isatap, gateway, router, etc.)
+	// must never be resolved from untrusted sources that LAN clients can write/announce
+	// (DHCP lease, mDNS, PTR).
+	reserved := isReservedOrDisallowedDomain(lower)
+
+	type source struct {
+		f         ipFinder
+		untrusted bool
+	}
+	sources := []source{
+		{t.hf, false}, {t.firewalla, false}, // operator-managed (firewalla already filters when registering)
+		{t.ptr, true}, {t.mdns, true}, {t.dhcp, true},
+	}
 	for _, name := range names {
-		for _, finder := range []ipFinder{t.hf, t.firewalla, t.ptr, t.mdns, t.dhcp} {
-			if finder == nil {
+		for _, s := range sources {
+			if s.f == nil || (reserved && s.untrusted) {
 				continue
 			}
-			if addr := finder.lookupIPByHostname(name, v6); addr != "" {
+			if addr := s.f.lookupIPByHostname(name, v6); addr != "" {
 				if ip, err := netip.ParseAddr(addr); err == nil {
 					return &ip
 				}
