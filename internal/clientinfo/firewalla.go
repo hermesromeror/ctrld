@@ -261,16 +261,14 @@ func (f *firewallaDiscover) storeDevices(r io.Reader) error {
 			f.mac2name.Store(mac, chosen)
 			if ip != "" {
 				f.ip2name.Store(ip, chosen)
-				f.domain2ip.Store(strings.ToLower(chosen), ip)
-				slug := strings.ReplaceAll(strings.ToLower(chosen), " ", "-")
-				f.domain2ip.Store(slug, ip)
+				registerDomainSlug(f, chosen, ip)
 			}
 		}
 		if ip != "" {
 			f.mac2ip.Store(mac, ip)
 			f.ip2mac.Store(ip, mac)
 			if ldom := strings.ToLower(strings.TrimSpace(dev.LDom)); ldom != "" {
-				f.domain2ip.Store(ldom, ip)
+				registerDomainSlug(f, ldom, ip)
 			}
 		}
 	}
@@ -331,6 +329,46 @@ func cleanFirewallaHostname(s string) string {
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// isReservedOrDisallowedDomain blocks dangerous names like wpad, isatap, router, localhost
+// to prevent internal DNS poisoning/spoofing.
+func isReservedOrDisallowedDomain(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	for _, suffix := range []string{".lan", ".local", ".home.arpa"} {
+		lower = strings.TrimSuffix(lower, suffix)
+	}
+	// Extract the first label or single label
+	firstLabel := lower
+	if idx := strings.IndexByte(lower, '.'); idx != -1 {
+		firstLabel = lower[:idx]
+	}
+	switch firstLabel {
+	case "wpad", "isatap", "localhost", "broadcasthost", "router", "firewalla", "gateway", "dns", "ns", "proxy":
+		return true
+	default:
+		switch lower {
+		case "wpad", "isatap", "localhost", "broadcasthost", "router", "firewalla", "gateway", "dns", "ns", "proxy":
+			return true
+		default:
+			return false
+		}
+	}
+}
+
+func registerDomainSlug(f *firewallaDiscover, rawName, ip string) {
+	clean := strings.ToLower(strings.TrimSpace(rawName))
+	for _, suffix := range []string{".lan", ".local", ".home.arpa"} {
+		clean = strings.TrimSuffix(clean, suffix)
+	}
+	if clean == "" || isReservedOrDisallowedDomain(clean) {
+		return
+	}
+	f.domain2ip.Store(clean, ip)
+	slug := strings.ReplaceAll(clean, " ", "-")
+	if slug != clean {
+		f.domain2ip.Store(slug, ip)
+	}
 }
 
 func (f *firewallaDiscover) String() string {

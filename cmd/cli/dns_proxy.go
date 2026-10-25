@@ -991,7 +991,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		if upstreamConfig.UpstreamSendClientInfo() && req.ci != nil {
 			clientKey = req.ci.Mac + "|" + req.ci.IP + "|" + req.ci.Hostname
 		}
-		sfKey := fmt.Sprintf("%s|%d|%d|%s|%s|%s", upstream, q.Qtype, q.Qclass, strings.ToLower(q.Name), dnscache.CanonicalECS(msg), clientKey)
+		sfKey := fmt.Sprintf("%s|%d|%d|%s|%s|%s|do:%t|cd:%t", upstream, q.Qtype, q.Qclass, strings.ToLower(q.Name), dnscache.CanonicalECS(msg), clientKey, msg.CheckingDisabled, msg.AuthenticatedData)
 		msgCopy := msg.Copy()
 		baseCtx := context.WithoutCancel(ctx)
 		val, err, shared := p.inflightResolveGroup.Do(sfKey, func() (any, error) {
