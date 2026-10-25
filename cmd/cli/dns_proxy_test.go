@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -806,6 +808,40 @@ func Test_isLanHostnameQuery(t *testing.T) {
 	}
 }
 
+func Test_isLanHostnameQuery_withCiTable(t *testing.T) {
+	leaseFile := filepath.Join(t.TempDir(), "dnsmasq.leases")
+	err := os.WriteFile(leaseFile, []byte("1683329857 e6:20:59:b8:c1:6d 192.168.20.87 book2-pao *\n"), 0644)
+	require.NoError(t, err)
+	table := clientinfo.NewTable(&ctrld.Config{}, "", "", nil)
+	table.AddLeaseFile(leaseFile, ctrld.Dnsmasq)
+	table.Init()
+
+	tests := []struct {
+		name string
+		msg  *dns.Msg
+		want bool
+	}{
+		{"existing dotless A", newDnsMsgWithHostname("book2-pao", dns.TypeA), true},
+		{"existing dotless AAAA", newDnsMsgWithHostname("book2-pao", dns.TypeAAAA), true},
+		{"existing dotless TXT", newDnsMsgWithHostname("book2-pao", dns.TypeTXT), true},
+		{"existing dotless MX", newDnsMsgWithHostname("book2-pao", dns.TypeMX), true},
+		{"existing dotless HTTPS", newDnsMsgWithHostname("book2-pao", 65), true},
+		{"non-existing dotless TXT", newDnsMsgWithHostname("notexist", dns.TypeTXT), false},
+		{"non-existing dotless MX", newDnsMsgWithHostname("notexist", dns.TypeMX), false},
+		{"non-existing dotless HTTPS", newDnsMsgWithHostname("wpad", 65), true},
+		{"com DS passthrough", newDnsMsgWithHostname("com", dns.TypeDS), false},
+		{"com DNSKEY passthrough", newDnsMsgWithHostname("com", dns.TypeDNSKEY), false},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isLanHostnameQueryMsg(tc.msg, table); tc.want != got {
+				t.Errorf("unexpected result for %s, want: %v, got: %v", tc.name, tc.want, got)
+			}
+		})
+	}
+}
+
 func newDnsMsgPtr(ip string, t *testing.T) *dns.Msg {
 	t.Helper()
 	m := new(dns.Msg)
@@ -1008,4 +1044,61 @@ func Test_proxyPrivatePtrLookup_NXDOMAIN_SOA(t *testing.T) {
 	assert.Equal(t, "firewalla.lan.", soa.Ns)
 	assert.Equal(t, "hostmaster.firewalla.lan.", soa.Mbox)
 	assert.Equal(t, uint32(60), soa.Minttl)
+}
+
+func Test_proxyLanHostnameQuery_ExistingHost_v310(t *testing.T) {
+	leaseFile := filepath.Join(t.TempDir(), "dnsmasq.leases")
+	err := os.WriteFile(leaseFile, []byte("1683329857 e6:20:59:b8:c1:6d 192.168.20.87 book2-pao *\n"), 0644)
+	require.NoError(t, err)
+	table := clientinfo.NewTable(&ctrld.Config{}, "", "", nil)
+	table.AddLeaseFile(leaseFile, ctrld.Dnsmasq)
+	table.Init()
+
+	p := &prog{
+		ciTable: table,
+	}
+
+	// 1. Existing host A query: returns IP, Ttl=60, Authoritative=true, RecursionAvailable=true
+	mA := new(dns.Msg)
+	mA.SetQuestion("book2-pao.lan.", dns.TypeA)
+	respA := p.proxyLanHostnameQuery(context.Background(), mA)
+	require.NotNil(t, respA)
+	assert.Equal(t, dns.RcodeSuccess, respA.Rcode)
+	assert.True(t, respA.Authoritative)
+	assert.True(t, respA.RecursionAvailable)
+	require.Len(t, respA.Answer, 1)
+	aRecord, ok := respA.Answer[0].(*dns.A)
+	require.True(t, ok)
+	assert.Equal(t, "192.168.20.87", aRecord.A.String())
+	assert.Equal(t, uint32(60), aRecord.Hdr.Ttl)
+
+	// 2. Existing host dotless query: book2-pao TXT -> NODATA with SOA lan.
+	mTXT := new(dns.Msg)
+	mTXT.SetQuestion("book2-pao.", dns.TypeTXT)
+	respTXT := p.proxyLanHostnameQuery(context.Background(), mTXT)
+	require.NotNil(t, respTXT)
+	assert.Equal(t, dns.RcodeSuccess, respTXT.Rcode)
+	assert.True(t, respTXT.Authoritative)
+	assert.True(t, respTXT.RecursionAvailable)
+	assert.Empty(t, respTXT.Answer)
+	require.Len(t, respTXT.Ns, 1)
+	soaTXT, ok := respTXT.Ns[0].(*dns.SOA)
+	require.True(t, ok)
+	assert.Equal(t, "lan.", soaTXT.Hdr.Name)
+	assert.Equal(t, uint32(60), soaTXT.Hdr.Ttl)
+
+	// 3. Existing host PTR query: returns hostname with Ttl=60, Authoritative=true, RecursionAvailable=true
+	p.ptrLoopGuard = newLoopGuard()
+	mPTR := new(dns.Msg)
+	mPTR.SetQuestion("87.20.168.192.in-addr.arpa.", dns.TypePTR)
+	respPTR := p.proxyPrivatePtrLookup(context.Background(), mPTR)
+	require.NotNil(t, respPTR)
+	assert.Equal(t, dns.RcodeSuccess, respPTR.Rcode)
+	assert.True(t, respPTR.Authoritative)
+	assert.True(t, respPTR.RecursionAvailable)
+	require.Len(t, respPTR.Answer, 1)
+	ptrRecord, ok := respPTR.Answer[0].(*dns.PTR)
+	require.True(t, ok)
+	assert.Equal(t, "book2-pao.", ptrRecord.Ptr)
+	assert.Equal(t, uint32(60), ptrRecord.Hdr.Ttl)
 }

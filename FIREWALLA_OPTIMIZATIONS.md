@@ -178,9 +178,28 @@ El binario `v3.2-minmem` incorpora y preserva integralmente los arreglos de esta
   * Si el host existe y la consulta pide un tipo sin datos (`HTTPS`, `SVCB`, `TXT`, `MX` o `AAAA` en host solo-IPv4), se responde con `NOERROR` autoritativo, con `RecursionAvailable = true` y sección de autoridad con SOA sintético de 60s (**NODATA canónico RFC 2308**).
   * Previene que navegadores y resolvedores que aplican **RFC 8020 ("NXDOMAIN cut")** (como Chrome, Edge o systemd-resolved) descarten el registro `A` del host tras recibir una respuesta para la consulta paralela `HTTPS`.
 * **Contención de Consultas SRV en Zonas LAN:**
-  * Consultas SRV con sufijos locales (`*.lan`, `*.local`, `*.home.arpa`, `*.domain`) se interceptan localmente en `ctrld` y se devuelven como `NXDOMAIN` (o `NODATA` si el nombre base existe), evitando fugas al upstream WAN.
+  * Consultas SRV con sufijos locales (`*.lan`, `*.local`, `*.home.arpa`, `*.domain`, ej. `_ldap._tcp.foo.lan`) se interceptan localmente en `ctrld` y se devuelven como `NXDOMAIN` autoritativo sintético local (SOA 60s), evitando fugas al upstream WAN.
 * **Compilación Optimizada:**
   * Target Celeron J4125: `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v2` con build flag `v1.5.8+patched-v3.9-minmem`.
+
+---
+
+### Feature 11: Contención Dotless Completa, Unificación de RA y TTL 60s (v3.10-minmem)
+* **Archivos:** [`cmd/cli/dns_proxy.go`](file:///home/dev/projects/firewalla/ctrld/cmd/cli/dns_proxy.go), [`internal/clientinfo/client_info.go`](file:///home/dev/projects/firewalla/ctrld/internal/clientinfo/client_info.go).
+* **Contención Dotless para Hosts Locales Existentes en Todos los Tipos:**
+  * En v3.9, `isLanHostnameQuery` filtraba nombres dotless antes de evaluar `ciTable`, limitando la captura local a tipos host (`A`, `AAAA`, `HTTPS`, `SVCB`). Por ello, consultas como `book2-pao TXT` o `book2-pao MX` salían al upstream WAN (Control D) y recibían un `NXDOMAIN` externo para un host que sí existe en la red interna, arriesgando podas de caché indebidas bajo RFC 8020.
+  * En v3.10, `p.isLanHostnameQuery` evalúa la presencia del host en `ciTable`. Si existe (IPv4 o IPv6), se captura localmente para cualquier tipo de consulta, devolviendo `NOERROR` autoritativo con sección de autoridad con SOA sintético de 60s (**NODATA canónico RFC 2308**).
+  * Para nombres dotless que **no** existen en la red interna (ej. TLDs como `com`, `net`, `arpa`), solo se interceptan tipos de host (`A`, `AAAA`, `HTTPS`, `SVCB`) para contención local (ej. `wpad`), mientras que tipos de infraestructura y DNSSEC (`DS`, `DNSKEY`, `NS`, `SOA`, etc.) pasan íntegramente hacia upstream.
+* **Unificación de Flags de Recursividad (`RecursionAvailable`):**
+  * Las respuestas locales `A` y `AAAA` ahora fijan explícitamente `RecursionAvailable = true`, armonizando las cabeceras DNS con las respuestas locales `NODATA` y `NXDOMAIN`.
+* **Reducción de TTL Local a 60s (`localTTL`):**
+  * `localTTL` se reduce de 3600s a 60s para respuestas `A`, `AAAA` y `PTR`. Queda perfectamente sincronizado con el TTL del SOA sintético (60s), facilitando la convergencia rápida de clientes locales (Windows, systemd-resolved) ante cambios de arrendamiento DHCP.
+* **TTL y Banderas en PTR de Hosts Conocidos:**
+  * En `proxyPrivatePtrLookup`, las respuestas PTR de hosts conocidos ahora fijan explícitamente `Ttl: uint32(localTTL.Seconds())`, `Authoritative: true` y `RecursionAvailable: true`, eliminando el valor previo de `TTL 0`.
+* **Búsqueda Canónica Dual en `LookupIPByHostname`:**
+  * `Table.LookupIPByHostname` ahora normaliza el hostname recibido y busca tanto el nombre calificado como el nombre base sin sufijos locales (`.lan`, `.local`, `.home.arpa`, `.domain`), unificando la resolución en todas las fuentes de descubrimiento (DHCP leases, hostsfile, mDNS, Firewalla).
+* **Compilación Optimizada:**
+  * Target Celeron J4125: `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v2` con build flag `v1.5.8+patched-v3.10-minmem`.
 
 ---
 

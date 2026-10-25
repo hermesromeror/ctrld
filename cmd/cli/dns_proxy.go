@@ -22,6 +22,7 @@ import (
 	"tailscale.com/net/tsaddr"
 
 	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
@@ -30,7 +31,7 @@ import (
 
 const (
 	staleTTL            = 60 * time.Second
-	localTTL            = 3600 * time.Second
+	localTTL            = 60 * time.Second
 	negativeCacheMaxTTL = 60
 	prefetchThreshold   = 45 * time.Second
 	swrMaxStaleAge      = 5 * time.Minute
@@ -587,11 +588,14 @@ func (p *prog) proxyPrivatePtrLookup(ctx context.Context, msg *dns.Msg) *dns.Msg
 		answer := new(dns.Msg)
 		answer.SetReply(msg)
 		answer.Compress = true
+		answer.Authoritative = true
+		answer.RecursionAvailable = true
 		answer.Answer = []dns.RR{&dns.PTR{
 			Hdr: dns.RR_Header{
 				Name:   msg.Question[0].Name,
 				Rrtype: dns.TypePTR,
 				Class:  dns.ClassINET,
+				Ttl:    uint32(localTTL.Seconds()),
 			},
 			Ptr: dns.Fqdn(ptrName),
 		}}
@@ -680,6 +684,7 @@ func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg
 			answer.SetReply(msg)
 			answer.Compress = true
 			answer.Authoritative = true
+			answer.RecursionAvailable = true
 			answer.Answer = []dns.RR{&dns.A{
 				Hdr: dns.RR_Header{
 					Name:   msg.Question[0].Name,
@@ -702,6 +707,7 @@ func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg
 			answer.SetReply(msg)
 			answer.Compress = true
 			answer.Authoritative = true
+			answer.RecursionAvailable = true
 			answer.Answer = []dns.RR{&dns.AAAA{
 				Hdr: dns.RR_Header{
 					Name:   msg.Question[0].Name,
@@ -868,7 +874,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 					res.clientInfo = true
 					return res
 				}
-			case isLanHostnameQuery(req.msg):
+			case p.isLanHostnameQuery(req.msg):
 				isLanOrPtrQuery = true
 				if answer := p.proxyLanHostnameQuery(ctx, req.msg); answer != nil {
 					res.answer = answer
@@ -899,7 +905,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			upstreams, upstreamConfigs = p.upstreamsAndUpstreamConfigForPtr(upstreams, upstreamConfigs)
 			ctx = ctrld.LanQueryCtx(ctx)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "private PTR lookup, using upstreams: %v", upstreams)
-		case isLanHostnameQuery(req.msg):
+		case p.isLanHostnameQuery(req.msg):
 			isLanOrPtrQuery = true
 			if answer := p.proxyLanHostnameQuery(ctx, req.msg); answer != nil {
 				res.answer = answer
@@ -1946,8 +1952,18 @@ func isPrivatePtrLookup(m *dns.Msg) bool {
 	return false
 }
 
-// isLanHostnameQuery reports whether DNS message is a query for a LAN hostname.
+func (p *prog) isLanHostnameQuery(m *dns.Msg) bool {
+	return isLanHostnameQueryMsg(m, p.ciTable)
+}
+
+// isLanHostnameQuery reports whether DNS message is a query for a LAN hostname without client info table.
 func isLanHostnameQuery(m *dns.Msg) bool {
+	return isLanHostnameQueryMsg(m, nil)
+}
+
+// isLanHostnameQueryMsg reports whether DNS message is a query for a LAN hostname,
+// checking ciTable if available for dotless single-label names.
+func isLanHostnameQueryMsg(m *dns.Msg, ciTable *clientinfo.Table) bool {
 	if m == nil || len(m.Question) == 0 {
 		return false
 	}
@@ -1966,10 +1982,22 @@ func isLanHostnameQuery(m *dns.Msg) bool {
 	if q.Qtype == dns.TypeSRV {
 		return false
 	}
-	// For dotless single-label names (e.g. "wpad", "laptop"), only intercept host-lookup queries.
-	// Infrastructure and DNSSEC queries (DS, DNSKEY, NS, SOA, RRSIG, etc.) against TLDs (e.g. "com", "net")
-	// must pass through to upstream resolvers.
+	// For dotless single-label names (e.g. "wpad", "laptop", "com"):
 	if !strings.Contains(name, ".") {
+		// If the host exists in the local client info table (e.g. "book2-pao"),
+		// intercept all query types so that any query (A, AAAA, TXT, MX, etc.)
+		// is answered locally (IP or NODATA) without leaking to upstream WAN.
+		if ciTable != nil {
+			ip4 := ciTable.LookupIPByHostname(name, false)
+			ip6 := ciTable.LookupIPByHostname(name, true)
+			if (ip4 != nil && ip4.Is4()) || (ip6 != nil && ip6.Is6()) {
+				return true
+			}
+		}
+		// If host is not in ciTable, only intercept host-lookup queries (A, AAAA, HTTPS, SVCB)
+		// to contain local host probes (e.g. "wpad", "zzzqq-nope").
+		// Infrastructure and DNSSEC queries (DS, DNSKEY, NS, SOA, RRSIG, etc.) against TLDs (e.g. "com", "net")
+		// must pass through to upstream resolvers.
 		switch q.Qtype {
 		case dns.TypeA, dns.TypeAAAA, 65 /* TypeHTTPS */, 64 /* TypeSVCB */:
 			return true

@@ -524,13 +524,23 @@ func (t *Table) LookupIPByHostname(hostname string, v6 bool) *netip.Addr {
 	if t == nil {
 		return nil
 	}
-	for _, finder := range []ipFinder{t.hf, t.firewalla, t.ptr, t.mdns, t.dhcp} {
-		if finder == nil {
-			continue
+	names := []string{hostname}
+	lower := strings.ToLower(hostname)
+	for _, suffix := range []string{".lan", ".local", ".home.arpa", ".domain"} {
+		if strings.HasSuffix(lower, suffix) {
+			names = append(names, strings.TrimSuffix(lower, suffix))
+			break
 		}
-		if addr := finder.lookupIPByHostname(hostname, v6); addr != "" {
-			if ip, err := netip.ParseAddr(addr); err == nil {
-				return &ip
+	}
+	for _, name := range names {
+		for _, finder := range []ipFinder{t.hf, t.firewalla, t.ptr, t.mdns, t.dhcp} {
+			if finder == nil {
+				continue
+			}
+			if addr := finder.lookupIPByHostname(name, v6); addr != "" {
+				if ip, err := netip.ParseAddr(addr); err == nil {
+					return &ip
+				}
 			}
 		}
 	}
