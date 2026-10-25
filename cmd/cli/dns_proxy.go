@@ -1870,7 +1870,8 @@ func isLanHostname(name string) bool {
 	return !strings.Contains(name, ".") ||
 		strings.HasSuffix(name, ".domain") ||
 		strings.HasSuffix(name, ".lan") ||
-		strings.HasSuffix(name, ".local")
+		strings.HasSuffix(name, ".local") ||
+		strings.HasSuffix(name, ".home.arpa")
 }
 
 // ipv4ServiceContinuityPrefix is the RFC 7335 IPv4 Service Continuity Prefix

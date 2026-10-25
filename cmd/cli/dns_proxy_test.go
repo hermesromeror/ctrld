@@ -783,6 +783,7 @@ func Test_isLanHostnameQuery(t *testing.T) {
 		{".domain", newDnsMsgWithHostname("foo.domain", dns.TypeA), true},
 		{".lan", newDnsMsgWithHostname("foo.lan", dns.TypeA), true},
 		{".local", newDnsMsgWithHostname("foo.local", dns.TypeA), true},
+		{".home.arpa", newDnsMsgWithHostname("foo.home.arpa", dns.TypeA), true},
 	}
 	for _, tc := range tests {
 		tc := tc
