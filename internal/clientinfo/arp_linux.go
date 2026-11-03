@@ -20,8 +20,15 @@ func (a *arpDiscover) scan() {
 	for s.Scan() {
 		line := s.Text()
 		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
 		ip := fields[0]
+		flags := fields[2]
 		mac := fields[3]
+		if flags == "0x0" || mac == "00:00:00:00:00:00" || mac == "*" || mac == "" {
+			continue
+		}
 		a.mac.Store(ip, mac)
 		a.ip.Store(mac, ip)
 	}

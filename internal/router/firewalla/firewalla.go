@@ -61,8 +61,11 @@ func (f *Firewalla) Setup() error {
 	if err != nil {
 		return fmt.Errorf("generating dnsmasq config: %w", err)
 	}
-	if err := os.WriteFile(firewallaDNSMasqConfigPath, []byte(data), 0600); err != nil {
+	if err := os.WriteFile(firewallaDNSMasqConfigPath, []byte(data), 0644); err != nil {
 		return fmt.Errorf("writing ctrld config: %w", err)
+	}
+	if err := os.Chmod(firewallaDNSMasqConfigPath, 0644); err != nil {
+		return fmt.Errorf("chmod ctrld config: %w", err)
 	}
 
 	// Restart dnsmasq service.

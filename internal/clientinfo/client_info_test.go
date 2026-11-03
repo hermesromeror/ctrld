@@ -127,3 +127,53 @@ func TestTable_ListClients(t *testing.T) {
 		}
 	}
 }
+
+func TestTable_LookupIPByHostname_ReservedDisallowed(t *testing.T) {
+	table := &Table{
+		dhcp: &dhcp{},
+	}
+	table.dhcp.ip2name.Store("192.168.20.99", "wpad")
+	table.dhcp.ip2name.Store("192.168.20.98", "isatap")
+	table.dhcp.ip2name.Store("192.168.20.97", "gateway")
+	table.dhcp.ip2name.Store("192.168.20.96", "localhost")
+	table.dhcp.ip2name.Store("192.168.20.95", "com")
+	table.dhcp.ip2name.Store("192.168.20.87", "book2-pao")
+
+	reservedNames := []string{
+		"wpad", "wpad.lan", "wpad.local", "wpad.home.arpa", "wpad.domain",
+		"WPAD.LAN", "isatap", "isatap.lan", "isatap.local",
+		"gateway", "gateway.lan", "gateway.home.arpa",
+		"localhost", "localhost.lan",
+		"com", "com.lan", "net",
+	}
+	for _, name := range reservedNames {
+		if ip := table.LookupIPByHostname(name, false); ip != nil {
+			t.Errorf("LookupIPByHostname(%q) from untrusted source = %v; want nil (must be blocked for security)", name, ip)
+		}
+	}
+
+	legitNames := []string{"book2-pao", "book2-pao.lan", "book2-pao.local", "book2-pao.home.arpa", "book2-pao.domain"}
+	for _, name := range legitNames {
+		ip := table.LookupIPByHostname(name, false)
+		if ip == nil || ip.String() != "192.168.20.87" {
+			t.Errorf("LookupIPByHostname(%q) = %v; want 192.168.20.87", name, ip)
+		}
+	}
+
+	// Verify that trusted operator source (hf) can still resolve admin names like firewalla/gateway
+	table.hf = &hostsFile{
+		m: map[string][]string{
+			"192.168.20.1": {"firewalla", "firewalla.lan", "gateway"},
+		},
+	}
+	if ip := table.LookupIPByHostname("firewalla", false); ip == nil || ip.String() != "192.168.20.1" {
+		t.Errorf("LookupIPByHostname(firewalla) from trusted hf = %v; want 192.168.20.1", ip)
+	}
+	if ip := table.LookupIPByHostname("firewalla.lan", false); ip == nil || ip.String() != "192.168.20.1" {
+		t.Errorf("LookupIPByHostname(firewalla.lan) from trusted hf = %v; want 192.168.20.1", ip)
+	}
+	if ip := table.LookupIPByHostname("gateway", false); ip == nil || ip.String() != "192.168.20.1" {
+		t.Errorf("LookupIPByHostname(gateway) from trusted hf = %v; want 192.168.20.1", ip)
+	}
+}
+

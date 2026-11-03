@@ -83,6 +83,7 @@ type Table struct {
 	dhcp           *dhcp
 	merlin         *merlinDiscover
 	ubios          *ubiosDiscover
+	firewalla      *firewallaDiscover
 	arp            *arpDiscover
 	ndp            *ndpDiscover
 	ptr            *ptrDiscover
@@ -119,6 +120,17 @@ func (t *Table) AddLeaseFile(name string, format ctrld.LeaseFileFormat) {
 		return
 	}
 	clientInfoFiles[name] = format
+}
+
+// StoreDHCPForTest injects an IP and hostname mapping directly into Table's DHCP finder for tests.
+func (t *Table) StoreDHCPForTest(ip, name string) {
+	if t == nil {
+		return
+	}
+	if t.dhcp == nil {
+		t.dhcp = &dhcp{}
+	}
+	t.dhcp.ip2name.Store(ip, name)
 }
 
 // RefreshLoop runs all the refresher to update new client info data.
@@ -181,7 +193,9 @@ func (t *Table) SetSelfIP(ip string) {
 
 // initSelfDiscover initializes necessary client metadata for self query.
 func (t *Table) initSelfDiscover() {
-	t.dhcp = &dhcp{selfIP: t.selfIP}
+	if t.dhcp == nil {
+		t.dhcp = &dhcp{selfIP: t.selfIP}
+	}
 	t.dhcp.addSelf()
 	t.ipResolvers = append(t.ipResolvers, t.dhcp)
 	t.macResolvers = append(t.macResolvers, t.dhcp)
@@ -209,15 +223,18 @@ func (t *Table) init() {
 	// Routers custom clients:
 	//  - Merlin
 	//  - Ubios
+	//  - Firewalla
 	if t.discoverDHCP() || t.discoverARP() {
 		t.merlin = &merlinDiscover{}
 		t.ubios = &ubiosDiscover{}
+		t.firewalla = &firewallaDiscover{}
 		discovers := map[string]interface {
 			refresher
 			HostnameResolver
 		}{
-			"Merlin": t.merlin,
-			"Ubios":  t.ubios,
+			"Merlin":    t.merlin,
+			"Ubios":     t.ubios,
+			"Firewalla": t.firewalla,
 		}
 		for platform, discover := range discovers {
 			if err := discover.refresh(); err != nil {
@@ -241,7 +258,9 @@ func (t *Table) init() {
 	}
 	// DHCP lease files.
 	if t.discoverDHCP() {
-		t.dhcp = &dhcp{selfIP: t.selfIP}
+		if t.dhcp == nil {
+			t.dhcp = &dhcp{selfIP: t.selfIP}
+		}
 		ctrld.ProxyLogger.Load().Debug().Msg("start dhcp discovery")
 		if err := t.dhcp.init(); err != nil {
 			ctrld.ProxyLogger.Load().Error().Err(err).Msg("could not init DHCP discover")
@@ -282,6 +301,10 @@ func (t *Table) init() {
 		}()
 		go t.ndp.listen(ctx)
 		go t.ndp.subscribe(ctx)
+	}
+	if t.firewalla != nil {
+		t.ipResolvers = append(t.ipResolvers, t.firewalla)
+		t.macResolvers = append(t.macResolvers, t.firewalla)
 	}
 	// PTR lookup.
 	if t.discoverPTR() {
@@ -353,6 +376,9 @@ func (t *Table) LookupMac(ip string) string {
 
 func (t *Table) LookupHostname(ip, mac string) string {
 	t.initOnce.Do(t.init)
+	if mac == "" && ip != "" && ip != ipV4Loopback && ip != ipv6Loopback {
+		mac = t.LookupMac(ip)
+	}
 	for _, r := range t.hostnameResolvers {
 		if name := r.LookupHostnameByIP(ip); name != "" {
 			return name
@@ -435,7 +461,7 @@ func (t *Table) lookupHostnameAll(ip, mac string) []*hostnameEntry {
 func (t *Table) ListClients() []*Client {
 	t.Refresh()
 	ipMap := make(map[string]*Client)
-	il := []ipLister{t.dhcp, t.arp, t.ndp, t.ptr, t.mdns, t.vni}
+	il := []ipLister{t.dhcp, t.firewalla, t.arp, t.ndp, t.ptr, t.mdns, t.vni}
 
 	for _, ir := range il {
 		if ir == nil {
@@ -513,10 +539,37 @@ func (t *Table) LookupIPByHostname(hostname string, v6 bool) *netip.Addr {
 	if t == nil {
 		return nil
 	}
-	for _, finder := range []ipFinder{t.hf, t.ptr, t.mdns, t.dhcp} {
-		if addr := finder.lookupIPByHostname(hostname, v6); addr != "" {
-			if ip, err := netip.ParseAddr(addr); err == nil {
-				return &ip
+	names := []string{hostname}
+	lower := strings.ToLower(hostname)
+	for _, suffix := range []string{".lan", ".local", ".home.arpa", ".domain"} {
+		if strings.HasSuffix(lower, suffix) {
+			names = append(names, strings.TrimSuffix(lower, suffix))
+			break
+		}
+	}
+
+	// Traffic-attracting and sensitive names (wpad, isatap, gateway, router, etc.)
+	// must never be resolved from untrusted sources that LAN clients can write/announce
+	// (DHCP lease, mDNS, PTR).
+	reserved := isReservedOrDisallowedDomain(lower)
+
+	type source struct {
+		f         ipFinder
+		untrusted bool
+	}
+	sources := []source{
+		{t.hf, false}, {t.firewalla, false}, // operator-managed (firewalla already filters when registering)
+		{t.ptr, true}, {t.mdns, true}, {t.dhcp, true},
+	}
+	for _, name := range names {
+		for _, s := range sources {
+			if s.f == nil || (reserved && s.untrusted) {
+				continue
+			}
+			if addr := s.f.lookupIPByHostname(name, v6); addr != "" {
+				if ip, err := netip.ParseAddr(addr); err == nil {
+					return &ip
+				}
 			}
 		}
 	}

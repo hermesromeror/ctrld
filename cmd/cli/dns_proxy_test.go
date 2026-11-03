@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	"github.com/Control-D-Inc/ctrld/testhelper"
 )
@@ -778,10 +779,21 @@ func Test_isLanHostnameQuery(t *testing.T) {
 		{"AAAA", newDnsMsgWithHostname("foo", dns.TypeAAAA), true},
 		{"A not LAN", newDnsMsgWithHostname("example.com", dns.TypeA), false},
 		{"AAAA not LAN", newDnsMsgWithHostname("example.com", dns.TypeAAAA), false},
-		{"Not A or AAAA", newDnsMsgWithHostname("foo", dns.TypeTXT), false},
+		{"TXT lan suffix", newDnsMsgWithHostname("foo.lan", dns.TypeTXT), true},
+		{"TXT dotless single-label", newDnsMsgWithHostname("foo", dns.TypeTXT), false},
+		{"SRV excluded", newDnsMsgWithHostname("foo", dns.TypeSRV), false},
+		{"HTTPS lan suffix", newDnsMsgWithHostname("foo.lan", 65), true},
+		{"HTTPS dotless single-label", newDnsMsgWithHostname("wpad", 65), true},
+		{"UPPERCASE", newDnsMsgWithHostname("WPAD.LAN", dns.TypeA), true},
 		{".domain", newDnsMsgWithHostname("foo.domain", dns.TypeA), true},
 		{".lan", newDnsMsgWithHostname("foo.lan", dns.TypeA), true},
 		{".local", newDnsMsgWithHostname("foo.local", dns.TypeA), true},
+		{".home.arpa", newDnsMsgWithHostname("foo.home.arpa", dns.TypeA), true},
+		{"com DS passthrough", newDnsMsgWithHostname("com", dns.TypeDS), false},
+		{"com DNSKEY passthrough", newDnsMsgWithHostname("com", dns.TypeDNSKEY), false},
+		{"net DS passthrough", newDnsMsgWithHostname("net", dns.TypeDS), false},
+		{"arpa NS passthrough", newDnsMsgWithHostname("arpa", dns.TypeNS), false},
+		{"root NS passthrough", newDnsMsgWithHostname("", dns.TypeNS), false},
 	}
 	for _, tc := range tests {
 		tc := tc
@@ -789,6 +801,51 @@ func Test_isLanHostnameQuery(t *testing.T) {
 			t.Parallel()
 			if got := isLanHostnameQuery(tc.msg); tc.isLanHostnameQuery != got {
 				t.Errorf("unexpected result, want: %v, got: %v", tc.isLanHostnameQuery, got)
+			}
+		})
+	}
+}
+
+func Test_isLanHostnameQuery_withCiTable(t *testing.T) {
+	table := clientinfo.NewTable(&ctrld.Config{}, "", "", nil)
+	table.StoreDHCPForTest("192.168.20.87", "book2-pao")
+	table.StoreDHCPForTest("192.168.20.95", "com")
+	table.StoreDHCPForTest("192.168.20.99", "wpad")
+
+	tests := []struct {
+		name string
+		msg  *dns.Msg
+		want bool
+	}{
+		{"existing dotless A", newDnsMsgWithHostname("book2-pao", dns.TypeA), true},
+		{"existing dotless AAAA", newDnsMsgWithHostname("book2-pao", dns.TypeAAAA), true},
+		{"existing dotless TXT", newDnsMsgWithHostname("book2-pao", dns.TypeTXT), true},
+		{"existing dotless MX", newDnsMsgWithHostname("book2-pao", dns.TypeMX), true},
+		{"existing dotless NS", newDnsMsgWithHostname("book2-pao", dns.TypeNS), true},
+		{"existing dotless SOA", newDnsMsgWithHostname("book2-pao", dns.TypeSOA), true},
+		{"existing dotless HTTPS", newDnsMsgWithHostname("book2-pao", 65), true},
+		{"non-existing dotless TXT", newDnsMsgWithHostname("notexist", dns.TypeTXT), false},
+		{"non-existing dotless MX", newDnsMsgWithHostname("notexist", dns.TypeMX), false},
+		{"non-existing dotless HTTPS", newDnsMsgWithHostname("wpad", 65), true},
+		{"com DS passthrough", newDnsMsgWithHostname("com", dns.TypeDS), false},
+		{"com DNSKEY passthrough", newDnsMsgWithHostname("com", dns.TypeDNSKEY), false},
+		{"com NS passthrough", newDnsMsgWithHostname("com", dns.TypeNS), false},
+		{"com SOA passthrough", newDnsMsgWithHostname("com", dns.TypeSOA), false},
+		{"existing dotless 'com' DS passthrough", newDnsMsgWithHostname("com", dns.TypeDS), false},
+		{"existing dotless 'com' DNSKEY passthrough", newDnsMsgWithHostname("com", dns.TypeDNSKEY), false},
+		{"existing dotless 'com' NS passthrough", newDnsMsgWithHostname("com", dns.TypeNS), false},
+		{"existing dotless 'com' SOA passthrough", newDnsMsgWithHostname("com", dns.TypeSOA), false},
+		{"existing dotless 'com' RRSIG passthrough", newDnsMsgWithHostname("com", dns.TypeRRSIG), false},
+		{"existing dotless 'com' NSEC passthrough", newDnsMsgWithHostname("com", dns.TypeNSEC), false},
+		{"existing dotless 'com' NSEC3 passthrough", newDnsMsgWithHostname("com", dns.TypeNSEC3), false},
+		{"untrusted lease 'wpad' TXT passthrough", newDnsMsgWithHostname("wpad", dns.TypeTXT), false},
+		{"untrusted lease 'wpad' MX passthrough", newDnsMsgWithHostname("wpad", dns.TypeMX), false},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isLanHostnameQueryMsg(tc.msg, table); tc.want != got {
+				t.Errorf("unexpected result for %s, want: %v, got: %v", tc.name, tc.want, got)
 			}
 		})
 	}
@@ -923,4 +980,158 @@ func Test_sameQuestion(t *testing.T) {
 			}
 		})
 	}
+}
+
+func Test_proxyLanHostnameQuery_NXDOMAIN_SOA(t *testing.T) {
+	p := &prog{
+		ciTable: clientinfo.NewTable(&ctrld.Config{}, "", "", nil),
+	}
+	tests := []struct {
+		name      string
+		qname     string
+		qtype     uint16
+		wantZone  string
+		wantSOA   bool
+		wantRcode int
+	}{
+		{"wpad.lan", "wpad.lan.", dns.TypeA, "lan.", true, dns.RcodeNameError},
+		{"WPAD.LAN uppercase", "WPAD.LAN.", dns.TypeA, "lan.", true, dns.RcodeNameError},
+		{"wpad single-label", "wpad.", dns.TypeA, "lan.", true, dns.RcodeNameError},
+		{"wpad.lan HTTPS", "wpad.lan.", 65, "lan.", true, dns.RcodeNameError},
+		{"wpad.lan MX", "wpad.lan.", dns.TypeMX, "lan.", true, dns.RcodeNameError},
+		{"printer.local", "printer.local.", dns.TypeA, "local.", true, dns.RcodeNameError},
+		{"nas.home.arpa", "nas.home.arpa.", dns.TypeA, "home.arpa.", true, dns.RcodeNameError},
+		{"google.com", "google.com.", dns.TypeA, "", false, 0},
+		{"com DS passthrough", "com.", dns.TypeDS, "", false, 0},
+		{"com DNSKEY passthrough", "com.", dns.TypeDNSKEY, "", false, 0},
+		{"net DS passthrough", "net.", dns.TypeDS, "", false, 0},
+		{"arpa NS passthrough", "arpa.", dns.TypeNS, "", false, 0},
+		{"root NS passthrough", ".", dns.TypeNS, "", false, 0},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			m := new(dns.Msg)
+			m.SetQuestion(tc.qname, tc.qtype)
+			resp := p.proxyLanHostnameQuery(context.Background(), m)
+			if !tc.wantSOA {
+				assert.Nil(t, resp)
+				return
+			}
+			require.NotNil(t, resp)
+			assert.Equal(t, tc.wantRcode, resp.Rcode)
+			assert.True(t, resp.Authoritative)
+			require.Len(t, resp.Ns, 1)
+			soa, ok := resp.Ns[0].(*dns.SOA)
+			require.True(t, ok)
+			assert.Equal(t, tc.wantZone, soa.Hdr.Name)
+			assert.Equal(t, uint32(60), soa.Hdr.Ttl)
+			assert.Equal(t, "firewalla."+tc.wantZone, soa.Ns)
+			assert.Equal(t, "hostmaster.firewalla."+tc.wantZone, soa.Mbox)
+			assert.Equal(t, uint32(60), soa.Minttl)
+		})
+	}
+}
+
+func Test_proxyPrivatePtrLookup_NXDOMAIN_SOA(t *testing.T) {
+	p := &prog{
+		cfg:          &ctrld.Config{},
+		ptrLoopGuard: newLoopGuard(),
+		ciTable:      clientinfo.NewTable(&ctrld.Config{}, "", "", nil),
+	}
+	m := new(dns.Msg)
+	m.SetQuestion("250.250.168.192.in-addr.arpa.", dns.TypePTR)
+	resp := p.proxyPrivatePtrLookup(context.Background(), m)
+	require.NotNil(t, resp)
+	assert.Equal(t, dns.RcodeNameError, resp.Rcode)
+	assert.True(t, resp.Authoritative)
+	require.Len(t, resp.Ns, 1)
+	soa, ok := resp.Ns[0].(*dns.SOA)
+	require.True(t, ok)
+	assert.Equal(t, "in-addr.arpa.", soa.Hdr.Name)
+	assert.Equal(t, uint32(60), soa.Hdr.Ttl)
+	assert.Equal(t, "firewalla.lan.", soa.Ns)
+	assert.Equal(t, "hostmaster.firewalla.lan.", soa.Mbox)
+	assert.Equal(t, uint32(60), soa.Minttl)
+}
+
+func Test_proxyLanHostnameQuery_ExistingHost_v310(t *testing.T) {
+	table := clientinfo.NewTable(&ctrld.Config{}, "", "", nil)
+	table.StoreDHCPForTest("192.168.20.87", "book2-pao")
+
+	p := &prog{
+		ciTable: table,
+	}
+
+	// 1. Existing host A query: returns IP, Ttl=60, Authoritative=true, RecursionAvailable=true
+	mA := new(dns.Msg)
+	mA.SetQuestion("book2-pao.lan.", dns.TypeA)
+	respA := p.proxyLanHostnameQuery(context.Background(), mA)
+	require.NotNil(t, respA)
+	assert.Equal(t, dns.RcodeSuccess, respA.Rcode)
+	assert.True(t, respA.Authoritative)
+	assert.True(t, respA.RecursionAvailable)
+	require.Len(t, respA.Answer, 1)
+	aRecord, ok := respA.Answer[0].(*dns.A)
+	require.True(t, ok)
+	assert.Equal(t, "192.168.20.87", aRecord.A.String())
+	assert.Equal(t, uint32(60), aRecord.Hdr.Ttl)
+
+	// 2. Existing host dotless query: book2-pao TXT -> NODATA with SOA lan.
+	mTXT := new(dns.Msg)
+	mTXT.SetQuestion("book2-pao.", dns.TypeTXT)
+	respTXT := p.proxyLanHostnameQuery(context.Background(), mTXT)
+	require.NotNil(t, respTXT)
+	assert.Equal(t, dns.RcodeSuccess, respTXT.Rcode)
+	assert.True(t, respTXT.Authoritative)
+	assert.True(t, respTXT.RecursionAvailable)
+	assert.Empty(t, respTXT.Answer)
+	require.Len(t, respTXT.Ns, 1)
+	soaTXT, ok := respTXT.Ns[0].(*dns.SOA)
+	require.True(t, ok)
+	assert.Equal(t, "lan.", soaTXT.Hdr.Name)
+	assert.Equal(t, uint32(60), soaTXT.Hdr.Ttl)
+
+	// 3. Existing host PTR query: returns hostname with Ttl=60, Authoritative=true, RecursionAvailable=true
+	p.ptrLoopGuard = newLoopGuard()
+	mPTR := new(dns.Msg)
+	mPTR.SetQuestion("87.20.168.192.in-addr.arpa.", dns.TypePTR)
+	respPTR := p.proxyPrivatePtrLookup(context.Background(), mPTR)
+	require.NotNil(t, respPTR)
+	assert.Equal(t, dns.RcodeSuccess, respPTR.Rcode)
+	assert.True(t, respPTR.Authoritative)
+	assert.True(t, respPTR.RecursionAvailable)
+	require.Len(t, respPTR.Answer, 1)
+	ptrRecord, ok := respPTR.Answer[0].(*dns.PTR)
+	require.True(t, ok)
+	assert.Equal(t, "book2-pao.", ptrRecord.Ptr)
+	assert.Equal(t, uint32(60), ptrRecord.Hdr.Ttl)
+
+	// 4. Existing host dotless NS query: book2-pao NS -> NODATA with SOA lan.
+	mNS := new(dns.Msg)
+	mNS.SetQuestion("book2-pao.", dns.TypeNS)
+	respNS := p.proxyLanHostnameQuery(context.Background(), mNS)
+	require.NotNil(t, respNS)
+	assert.Equal(t, dns.RcodeSuccess, respNS.Rcode)
+	assert.True(t, respNS.Authoritative)
+	assert.True(t, respNS.RecursionAvailable)
+	assert.Empty(t, respNS.Answer)
+	require.Len(t, respNS.Ns, 1)
+	soaNS, ok := respNS.Ns[0].(*dns.SOA)
+	require.True(t, ok)
+	assert.Equal(t, "lan.", soaNS.Hdr.Name)
+
+	// 5. Existing host dotless SOA query: book2-pao SOA -> NODATA with SOA lan.
+	mSOA := new(dns.Msg)
+	mSOA.SetQuestion("book2-pao.", dns.TypeSOA)
+	respSOA := p.proxyLanHostnameQuery(context.Background(), mSOA)
+	require.NotNil(t, respSOA)
+	assert.Equal(t, dns.RcodeSuccess, respSOA.Rcode)
+	assert.True(t, respSOA.Authoritative)
+	assert.True(t, respSOA.RecursionAvailable)
+	assert.Empty(t, respSOA.Answer)
+	require.Len(t, respSOA.Ns, 1)
+	soaSOA, ok := respSOA.Ns[0].(*dns.SOA)
+	require.True(t, ok)
+	assert.Equal(t, "lan.", soaSOA.Hdr.Name)
 }

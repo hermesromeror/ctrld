@@ -22,6 +22,7 @@ import (
 	"tailscale.com/net/tsaddr"
 
 	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
@@ -29,8 +30,12 @@ import (
 )
 
 const (
-	staleTTL = 60 * time.Second
-	localTTL = 3600 * time.Second
+	staleTTL            = 60 * time.Second
+	localTTL            = 60 * time.Second
+	negativeCacheMaxTTL = 60
+	prefetchThreshold   = 45 * time.Second
+	swrMaxStaleAge      = 5 * time.Minute
+	fallbackCacheMaxTTL = 60
 	// zpaDNSEchoDomain is Zscaler Client Connector's fixed public health-check
 	// name. Client Connector must see the answer to it arrive on its own DNS
 	// path before it will synthesize addresses for Private Access applications.
@@ -116,14 +121,88 @@ type upstreamForResult struct {
 }
 
 func (p *prog) addCachedResponse(key dnscache.Key, answer *dns.Msg) {
+	p.addCachedResponseWithMaxTTL(key, answer, 0)
+}
+
+func (p *prog) addCachedResponseWithMaxTTL(key dnscache.Key, answer *dns.Msg, maxTTL uint32) {
+	if answer == nil {
+		return
+	}
+	// Never cache transient protocol or server errors (SERVFAIL, REFUSED, FORMERR, NOTIMP).
+	if answer.Rcode != dns.RcodeSuccess && answer.Rcode != dns.RcodeNameError {
+		return
+	}
 	ttl := ttlFromMsg(answer)
+	if maxTTL > 0 && ttl > maxTTL {
+		ttl = maxTTL
+	}
 	now := time.Now()
 	expired := now.Add(time.Duration(ttl) * time.Second)
 	if cachedTTL := p.cfg.Service.CacheTTLOverride; cachedTTL > 0 {
+		if maxTTL > 0 && cachedTTL > int(maxTTL) {
+			cachedTTL = int(maxTTL)
+		}
+		if answer.Rcode == dns.RcodeNameError && cachedTTL > negativeCacheMaxTTL {
+			cachedTTL = negativeCacheMaxTTL
+		}
 		expired = now.Add(time.Duration(cachedTTL) * time.Second)
+	} else if answer.Rcode == dns.RcodeNameError && ttl > negativeCacheMaxTTL {
+		expired = now.Add(time.Duration(negativeCacheMaxTTL) * time.Second)
 	}
 	setCachedAnswerTTL(answer, now, expired)
-	p.cache.Add(key, dnscache.NewValue(answer, expired))
+	p.cache.Add(key, dnscache.NewValue(answer.Copy(), expired))
+}
+
+func (p *prog) cachedExpireTime(req *dns.Msg, upstream string, dns64Prefix netip.Prefix, dns64Active bool) (time.Time, bool) {
+	if p.cache == nil {
+		return time.Time{}, false
+	}
+	if dns64Active && dns64RequestAllowed(req) {
+		if cv := p.cache.Get(dns64CacheKey(req, upstream, dns64Prefix)); cv != nil {
+			return cv.Expire, true
+		}
+	}
+	if cv := p.cache.Get(dnscache.NewKey(req, upstream)); cv != nil {
+		return cv.Expire, true
+	}
+	return time.Time{}, false
+}
+
+func (p *prog) refreshCacheAsync(req *proxyRequest, upstream string, upstreamCfg *ctrld.UpstreamConfig) {
+	if p.cache == nil || upstreamCfg == nil || req == nil || req.msg == nil || len(req.msg.Question) == 0 {
+		return
+	}
+	cacheKey := dnscache.NewKey(req.msg, upstream)
+	sfKey := fmt.Sprintf("%s|%d|%d|%s|%s", upstream, cacheKey.Qtype, cacheKey.Qclass, cacheKey.Name, cacheKey.ECS)
+	if _, loaded := p.prefetchInFlight.LoadOrStore(sfKey, struct{}{}); loaded {
+		return
+	}
+	msgCopy := req.msg.Copy()
+	ci := req.ci
+	go func() {
+		defer p.prefetchInFlight.Delete(sfKey)
+		bgCtx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, requestID())
+		if upstreamCfg.UpstreamSendClientInfo() && ci != nil {
+			bgCtx = context.WithValue(bgCtx, ctrld.ClientInfoCtxKey{}, ci)
+		}
+		dnsResolver, err := ctrld.NewResolver(upstreamCfg)
+		if err != nil {
+			return
+		}
+		resolveCtx, cancel := upstreamCfg.Context(bgCtx)
+		defer cancel()
+		fresh, err := dnsResolver.Resolve(resolveCtx, msgCopy)
+		if err != nil || fresh == nil || !sameQuestion(msgCopy, fresh) {
+			return
+		}
+		if fresh.Rcode != dns.RcodeSuccess && fresh.Rcode != dns.RcodeNameError {
+			return
+		}
+		p.um.noteSuccess(upstream)
+		fresh.Compress = true
+		p.addCachedResponse(cacheKey, fresh)
+		ctrld.Log(bgCtx, mainLog.Load().Debug(), "background cache refresh updated %s via %s", cacheKey.Name, upstream)
+	}()
 }
 
 func (p *prog) cachedResponse(req *dns.Msg, upstream string, dns64Prefix netip.Prefix, dns64Active bool, now time.Time) (answer, stale *dns.Msg, hit, dns64Hit, dns64Bypass bool) {
@@ -503,23 +582,29 @@ macRules:
 
 func (p *prog) proxyPrivatePtrLookup(ctx context.Context, msg *dns.Msg) *dns.Msg {
 	cDomainName := msg.Question[0].Name
-	locked := p.ptrLoopGuard.TryLock(cDomainName)
-	defer p.ptrLoopGuard.Unlock(cDomainName)
-	if !locked {
-		return nil
+	if p.ptrLoopGuard != nil && (p.cfg == nil || p.cfg.Service.DiscoverPtr == nil || *p.cfg.Service.DiscoverPtr) {
+		locked := p.ptrLoopGuard.TryLock(cDomainName)
+		defer p.ptrLoopGuard.Unlock(cDomainName)
+		if !locked {
+			return nil
+		}
 	}
 	ip := ipFromARPA(cDomainName)
 	if name := p.ciTable.LookupHostname(ip.String(), ""); name != "" {
+		ptrName := strings.ReplaceAll(strings.TrimSpace(name), " ", "-")
 		answer := new(dns.Msg)
 		answer.SetReply(msg)
 		answer.Compress = true
+		answer.Authoritative = true
+		answer.RecursionAvailable = true
 		answer.Answer = []dns.RR{&dns.PTR{
 			Hdr: dns.RR_Header{
 				Name:   msg.Question[0].Name,
 				Rrtype: dns.TypePTR,
 				Class:  dns.ClassINET,
+				Ttl:    uint32(localTTL.Seconds()),
 			},
-			Ptr: dns.Fqdn(name),
+			Ptr: dns.Fqdn(ptrName),
 		}}
 		ctrld.Log(ctx, mainLog.Load().Info(), "private PTR lookup, using client info table")
 		ctrld.Log(ctx, mainLog.Load().Debug(), "client info: %v", ctrld.ClientInfo{
@@ -529,23 +614,84 @@ func (p *prog) proxyPrivatePtrLookup(ctx context.Context, msg *dns.Msg) *dns.Msg
 		})
 		return answer
 	}
-	return nil
+	// Never leak unresolvable RFC 1918 / private PTR queries to WAN upstreams (RFC 6303).
+	// Terminate locally with an authoritative NXDOMAIN response.
+	answer := new(dns.Msg)
+	answer.SetRcode(msg, dns.RcodeNameError)
+	answer.Authoritative = true
+	answer.RecursionAvailable = true
+	answer.Compress = true
+	soaZone := "in-addr.arpa."
+	lower := strings.ToLower(cDomainName)
+	if strings.HasSuffix(lower, ".ip6.arpa.") || strings.HasSuffix(lower, ".ip6.arpa") {
+		soaZone = "ip6.arpa."
+	}
+	answer.Ns = []dns.RR{&dns.SOA{
+		Hdr: dns.RR_Header{
+			Name:   soaZone,
+			Rrtype: dns.TypeSOA,
+			Class:  dns.ClassINET,
+			Ttl:    60,
+		},
+		Ns:      "firewalla.lan.",
+		Mbox:    "hostmaster.firewalla.lan.",
+		Serial:  1,
+		Refresh: 60,
+		Retry:   30,
+		Expire:  86400,
+		Minttl:  60,
+	}}
+	ctrld.Log(ctx, mainLog.Load().Info(), "private PTR lookup %s not found in client info table, returning local NXDOMAIN", cDomainName)
+	return answer
 }
 
 func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg {
-	q := msg.Question[0]
-	hostname := strings.TrimSuffix(q.Name, ".")
-	locked := p.lanLoopGuard.TryLock(hostname)
-	defer p.lanLoopGuard.Unlock(hostname)
-	if !locked {
+	if p.ciTable == nil || len(msg.Question) == 0 {
 		return nil
 	}
-	if ip := p.ciTable.LookupIPByHostname(hostname, q.Qtype == dns.TypeAAAA); ip != nil {
-		answer := new(dns.Msg)
-		answer.SetReply(msg)
-		answer.Compress = true
-		switch {
-		case ip.Is4():
+	q := msg.Question[0]
+	hostname := strings.TrimSuffix(q.Name, ".")
+	lower := strings.ToLower(hostname)
+	if lower == "" {
+		return nil
+	}
+	isLanSuffix := strings.HasSuffix(lower, ".lan") ||
+		strings.HasSuffix(lower, ".local") ||
+		strings.HasSuffix(lower, ".home.arpa") ||
+		strings.HasSuffix(lower, ".domain")
+	isSingleLabel := !strings.Contains(lower, ".")
+
+	if !isLanSuffix && !isSingleLabel {
+		return nil
+	}
+
+	// Check if host exists in client info table (has either IPv4 or IPv6 assigned).
+	ip4 := p.ciTable.LookupIPByHostname(hostname, false)
+	ip6 := p.ciTable.LookupIPByHostname(hostname, true)
+	exists := (ip4 != nil && ip4.Is4()) || (ip6 != nil && ip6.Is6())
+
+	// For dotless single-label names:
+	// - If the host does NOT exist in ciTable, only intercept host-lookup query types (A, AAAA, HTTPS, SVCB)
+	//   to prevent LAN leaks (e.g. "wpad", "zzzqq-nope"), while allowing infrastructure/DNSSEC queries
+	//   against TLDs (e.g. "com DS", "com DNSKEY") to pass through to upstreams.
+	// - If the host DOES exist in ciTable (e.g. "book2-pao"), intercept any query type and return either
+	//   the IP or a local NODATA response, preventing unnecessary leaks to upstream for local machines.
+	if isSingleLabel && !isLanSuffix && !exists {
+		switch q.Qtype {
+		case dns.TypeA, dns.TypeAAAA, 65 /* TypeHTTPS */, 64 /* TypeSVCB */:
+		default:
+			return nil
+		}
+	}
+
+	// 1. Host exists and requested RR type matches available IP address:
+	if exists {
+		if q.Qtype == dns.TypeA && ip4 != nil && ip4.Is4() {
+			answer := new(dns.Msg)
+			answer.SetReply(msg)
+			answer.Compress = true
+			answer.Authoritative = true
+			answer.RecursionAvailable = true
 			answer.Answer = []dns.RR{&dns.A{
 				Hdr: dns.RR_Header{
 					Name:   msg.Question[0].Name,
@@ -553,9 +699,22 @@ func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg
 					Class:  dns.ClassINET,
 					Ttl:    uint32(localTTL.Seconds()),
 				},
-				A: ip.AsSlice(),
+				A: ip4.AsSlice(),
 			}}
-		case ip.Is6():
+			ctrld.Log(ctx, mainLog.Load().Info(), "lan hostname lookup, using client info table")
+			ctrld.Log(ctx, mainLog.Load().Debug(), "client info: %v", ctrld.ClientInfo{
+				Mac:      p.ciTable.LookupMac(ip4.String()),
+				IP:       ip4.String(),
+				Hostname: hostname,
+			})
+			return answer
+		}
+		if q.Qtype == dns.TypeAAAA && ip6 != nil && ip6.Is6() {
+			answer := new(dns.Msg)
+			answer.SetReply(msg)
+			answer.Compress = true
+			answer.Authoritative = true
+			answer.RecursionAvailable = true
 			answer.Answer = []dns.RR{&dns.AAAA{
 				Hdr: dns.RR_Header{
 					Name:   msg.Question[0].Name,
@@ -563,18 +722,79 @@ func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg
 					Class:  dns.ClassINET,
 					Ttl:    uint32(localTTL.Seconds()),
 				},
-				AAAA: ip.AsSlice(),
+				AAAA: ip6.AsSlice(),
 			}}
+			ctrld.Log(ctx, mainLog.Load().Info(), "lan hostname lookup, using client info table")
+			ctrld.Log(ctx, mainLog.Load().Debug(), "client info: %v", ctrld.ClientInfo{
+				Mac:      p.ciTable.LookupMac(ip6.String()),
+				IP:       ip6.String(),
+				Hostname: hostname,
+			})
+			return answer
 		}
-		ctrld.Log(ctx, mainLog.Load().Info(), "lan hostname lookup, using client info table")
-		ctrld.Log(ctx, mainLog.Load().Debug(), "client info: %v", ctrld.ClientInfo{
-			Mac:      p.ciTable.LookupMac(ip.String()),
-			IP:       ip.String(),
-			Hostname: hostname,
-		})
+	}
+
+	soaZone := "lan."
+	if strings.HasSuffix(lower, ".local") {
+		soaZone = "local."
+	} else if strings.HasSuffix(lower, ".home.arpa") {
+		soaZone = "home.arpa."
+	} else if strings.HasSuffix(lower, ".domain") {
+		soaZone = "domain."
+	}
+
+	// 2. Host exists, but does not have the requested record type (NODATA / RFC 2308):
+	// Returns NOERROR, Authoritative, RecursionAvailable, with synthetic SOA in Authority section.
+	if exists {
+		answer := new(dns.Msg)
+		answer.SetReply(msg)
+		answer.Authoritative = true
+		answer.RecursionAvailable = true
+		answer.Compress = true
+		answer.Ns = []dns.RR{&dns.SOA{
+			Hdr: dns.RR_Header{
+				Name:   soaZone,
+				Rrtype: dns.TypeSOA,
+				Class:  dns.ClassINET,
+				Ttl:    60,
+			},
+			Ns:      "firewalla." + soaZone,
+			Mbox:    "hostmaster.firewalla." + soaZone,
+			Serial:  1,
+			Refresh: 60,
+			Retry:   30,
+			Expire:  86400,
+			Minttl:  60,
+		}}
+		ctrld.Log(ctx, mainLog.Load().Info(), "lan hostname query %s exists in client info table, returning local NODATA for type %d", q.Name, q.Qtype)
 		return answer
 	}
-	return nil
+
+	// Host does NOT exist in client info table.
+	// Never leak unresolvable .lan, .local, .home.arpa, .domain, or single-label queries to WAN upstreams.
+	// Terminate locally with an authoritative NXDOMAIN response with synthetic SOA (RFC 2308 / RFC 7085).
+	answer := new(dns.Msg)
+	answer.SetRcode(msg, dns.RcodeNameError)
+	answer.Authoritative = true
+	answer.RecursionAvailable = true
+	answer.Compress = true
+	answer.Ns = []dns.RR{&dns.SOA{
+		Hdr: dns.RR_Header{
+			Name:   soaZone,
+			Rrtype: dns.TypeSOA,
+			Class:  dns.ClassINET,
+			Ttl:    60,
+		},
+		Ns:      "firewalla." + soaZone,
+		Mbox:    "hostmaster.firewalla." + soaZone,
+		Serial:  1,
+		Refresh: 60,
+		Retry:   30,
+		Expire:  86400,
+		Minttl:  60,
+	}}
+	ctrld.Log(ctx, mainLog.Load().Info(), "lan hostname query %s not found in client info table, returning local NXDOMAIN", q.Name)
+	return answer
 }
 
 func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
@@ -668,6 +888,24 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			ctx = ctrld.LanQueryCtx(ctx)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "active directory domain lookup, skipping public DNS")
 		}
+		if req.ufr.matchedRule == noRuleMatched && p.ciTable != nil {
+			switch {
+			case isPrivatePtrLookup(req.msg):
+				isLanOrPtrQuery = true
+				if answer := p.proxyPrivatePtrLookup(ctx, req.msg); answer != nil {
+					res.answer = answer
+					res.clientInfo = true
+					return res
+				}
+			case p.isLanHostnameQuery(req.msg):
+				isLanOrPtrQuery = true
+				if answer := p.proxyLanHostnameQuery(ctx, req.msg); answer != nil {
+					res.answer = answer
+					res.clientInfo = true
+					return res
+				}
+			}
+		}
 	} else {
 		switch {
 		case req.ufr.zpaDNSEcho:
@@ -690,7 +928,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			upstreams, upstreamConfigs = p.upstreamsAndUpstreamConfigForPtr(upstreams, upstreamConfigs)
 			ctx = ctrld.LanQueryCtx(ctx)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "private PTR lookup, using upstreams: %v", upstreams)
-		case isLanHostnameQuery(req.msg):
+		case p.isLanHostnameQuery(req.msg):
 			isLanOrPtrQuery = true
 			if answer := p.proxyLanHostnameQuery(ctx, req.msg); answer != nil {
 				res.answer = answer
@@ -711,8 +949,17 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		if req.msg.Question[0].Qtype == dns.TypeAAAA {
 			dns64Prefix, dns64Active = p.activeDNS64Prefix()
 		}
+		now := time.Now()
+		var refreshUpstream string
+		if len(upstreams) > 0 {
+			refreshUpstream = upstreams[0]
+		}
+		var refreshCfg *ctrld.UpstreamConfig
+		if len(upstreamConfigs) > 0 {
+			refreshCfg = upstreamConfigs[0]
+		}
 		for _, upstream := range upstreams {
-			answer, stale, hit, dns64Hit, dns64Bypass := p.cachedResponse(req.msg, upstream, dns64Prefix, dns64Active, time.Now())
+			answer, stale, hit, dns64Hit, dns64Bypass := p.cachedResponse(req.msg, upstream, dns64Prefix, dns64Active, now)
 			if stale != nil {
 				staleAnswer = stale
 			}
@@ -720,7 +967,28 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				ctrld.Log(ctx, mainLog.Load().Debug(), "dns64: bypassing cached empty-AAAA answer for synthesis")
 			}
 			if !hit {
+				// Stale-While-Revalidate (SWR): if cache_serve_stale is enabled and the entry
+				// expired within swrMaxStaleAge, serve the stale record immediately and refresh
+				// it asynchronously in the background.
+				if serveStaleCache && stale != nil && !dns64Bypass {
+					if exp, ok := p.cachedExpireTime(req.msg, upstream, dns64Prefix, dns64Active); ok && now.Sub(exp) <= swrMaxStaleAge {
+						ctrld.Log(ctx, mainLog.Load().Debug(), "serving stale-while-revalidate cached response")
+						p.health.countCacheHit()
+						setCachedAnswerTTL(stale, now, now.Add(staleTTL))
+						if refreshUpstream != "" {
+							p.refreshCacheAsync(req, refreshUpstream, refreshCfg)
+						}
+						res.answer = stale
+						res.cached = true
+						return res
+					}
+				}
 				continue
+			}
+			if exp, ok := p.cachedExpireTime(req.msg, upstream, dns64Prefix, dns64Active); ok && exp.Sub(now) <= prefetchThreshold {
+				if refreshUpstream != "" {
+					p.refreshCacheAsync(req, refreshUpstream, refreshCfg)
+				}
 			}
 			if dns64Hit {
 				ctrld.Log(ctx, mainLog.Load().Debug(), "dns64: hit cached response variant")
@@ -875,9 +1143,41 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to create resolver")
 			return nil, err
 		}
-		resolveCtx, cancel := upstreamConfig.Context(ctx)
-		defer cancel()
-		return dnsResolver.Resolve(resolveCtx, msg)
+		if len(msg.Question) == 0 {
+			resolveCtx, cancel := upstreamConfig.Context(ctx)
+			defer cancel()
+			return dnsResolver.Resolve(resolveCtx, msg)
+		}
+		q := msg.Question[0]
+		clientKey := ""
+		if upstreamConfig.UpstreamSendClientInfo() && req.ci != nil {
+			clientKey = req.ci.Mac + "|" + req.ci.IP + "|" + req.ci.Hostname
+		}
+		doBit := false
+		if opt := msg.IsEdns0(); opt != nil {
+			doBit = opt.Do()
+		}
+		sfKey := fmt.Sprintf("%s|%d|%d|%s|%s|%s|cd:%t|ad:%t|do:%t", upstream, q.Qtype, q.Qclass, strings.ToLower(q.Name), dnscache.CanonicalECS(msg), clientKey, msg.CheckingDisabled, msg.AuthenticatedData, doBit)
+		msgCopy := msg.Copy()
+		baseCtx := context.WithoutCancel(ctx)
+		val, err, shared := p.inflightResolveGroup.Do(sfKey, func() (any, error) {
+			resolveCtx, cancel := upstreamConfig.Context(baseCtx)
+			defer cancel()
+			return dnsResolver.Resolve(resolveCtx, msgCopy)
+		})
+		if err != nil || val == nil {
+			return nil, err
+		}
+		ans, _ := val.(*dns.Msg)
+		if ans == nil {
+			return nil, nil
+		}
+		cloned := ans.Copy()
+		cloned.Id = msg.Id
+		if shared {
+			ctrld.Log(ctx, mainLog.Load().Debug(), "coalesced in-flight query to %s: %s", upstream, upstreamConfig.Name)
+		}
+		return cloned, nil
 	}
 	resolve := func(upstream string, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) *dns.Msg {
 		if upstreamConfig.UpstreamSendClientInfo() && req.ci != nil {
@@ -1001,7 +1301,11 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			answer.Compress = true
 
 			if cacheable {
-				p.addCachedResponse(dnscache.NewKey(req.msg, upstreams[n]), answer)
+				maxTTL := uint32(0)
+				if n > 0 {
+					maxTTL = fallbackCacheMaxTTL
+				}
+				p.addCachedResponseWithMaxTTL(dnscache.NewKey(req.msg, upstreams[n]), answer, maxTTL)
 				ctrld.Log(ctx, mainLog.Load().Debug(), "add cached response")
 			}
 			hostname := ""
@@ -1712,18 +2016,76 @@ func isPrivatePtrLookup(m *dns.Msg) bool {
 	return false
 }
 
-// isLanHostnameQuery reports whether DNS message is an A/AAAA query with LAN hostname.
+func (p *prog) isLanHostnameQuery(m *dns.Msg) bool {
+	return isLanHostnameQueryMsg(m, p.ciTable)
+}
+
+// isLanHostnameQuery reports whether DNS message is a query for a LAN hostname without client info table.
 func isLanHostnameQuery(m *dns.Msg) bool {
+	return isLanHostnameQueryMsg(m, nil)
+}
+
+// isLanHostnameQueryMsg reports whether DNS message is a query for a LAN hostname,
+// checking ciTable if available for dotless single-label names.
+func isLanHostnameQueryMsg(m *dns.Msg, ciTable *clientinfo.Table) bool {
 	if m == nil || len(m.Question) == 0 {
 		return false
 	}
 	q := m.Question[0]
-	switch q.Qtype {
-	case dns.TypeA, dns.TypeAAAA:
-	default:
+	name := strings.ToLower(strings.TrimSuffix(q.Name, "."))
+	if name == "" {
 		return false
 	}
-	return isLanHostname(q.Name)
+	isLanSuffix := strings.HasSuffix(name, ".domain") ||
+		strings.HasSuffix(name, ".lan") ||
+		strings.HasSuffix(name, ".local") ||
+		strings.HasSuffix(name, ".home.arpa")
+	if isLanSuffix {
+		return true
+	}
+	if q.Qtype == dns.TypeSRV {
+		return false
+	}
+	// For dotless single-label names (e.g. "wpad", "laptop", "com"):
+	if !strings.Contains(name, ".") {
+		// Infrastructure and DNSSEC queries (DS, DNSKEY, NS, SOA, RRSIG, NSEC, NSEC3, etc.)
+		// must ALWAYS pass through to upstream resolvers even if a local device announced a TLD name.
+		if isDNSSECInfraType(q.Qtype) {
+			return false
+		}
+
+		// If the host exists in the local client info table (e.g. "book2-pao"),
+		// intercept all query types so that any query (A, AAAA, TXT, MX, etc.)
+		// is answered locally (IP or NODATA) without leaking to upstream WAN.
+		if ciTable != nil {
+			ip4 := ciTable.LookupIPByHostname(name, false)
+			ip6 := ciTable.LookupIPByHostname(name, true)
+			if (ip4 != nil && ip4.Is4()) || (ip6 != nil && ip6.Is6()) {
+				return true
+			}
+		}
+		// If host is not in ciTable, only intercept host-lookup queries (A, AAAA, HTTPS, SVCB)
+		// to contain local host probes (e.g. "wpad", "zzzqq-nope").
+		// Infrastructure and DNSSEC queries (DS, DNSKEY, NS, SOA, RRSIG, etc.) against TLDs (e.g. "com", "net")
+		// must pass through to upstream resolvers.
+		switch q.Qtype {
+		case dns.TypeA, dns.TypeAAAA, 65 /* TypeHTTPS */, 64 /* TypeSVCB */:
+			return true
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// isDNSSECInfraType reports whether query type is an infrastructure or DNSSEC delegation type.
+func isDNSSECInfraType(t uint16) bool {
+	switch t {
+	case dns.TypeDS, dns.TypeDNSKEY, dns.TypeNSEC, dns.TypeNSEC3, dns.TypeNSEC3PARAM,
+		dns.TypeRRSIG, dns.TypeCDS, dns.TypeCDNSKEY:
+		return true
+	}
+	return false
 }
 
 // isSrvLanLookup reports whether DNS message is an SRV query of a LAN hostname.
@@ -1737,11 +2099,15 @@ func isSrvLanLookup(m *dns.Msg) bool {
 
 // isLanHostname reports whether name is a LAN hostname.
 func isLanHostname(name string) bool {
-	name = strings.TrimSuffix(name, ".")
+	name = strings.ToLower(strings.TrimSuffix(name, "."))
+	if name == "" {
+		return false
+	}
 	return !strings.Contains(name, ".") ||
 		strings.HasSuffix(name, ".domain") ||
 		strings.HasSuffix(name, ".lan") ||
-		strings.HasSuffix(name, ".local")
+		strings.HasSuffix(name, ".local") ||
+		strings.HasSuffix(name, ".home.arpa")
 }
 
 // ipv4ServiceContinuityPrefix is the RFC 7335 IPv4 Service Continuity Prefix
