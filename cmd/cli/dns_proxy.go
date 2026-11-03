@@ -616,33 +616,51 @@ func (p *prog) proxyPrivatePtrLookup(ctx context.Context, msg *dns.Msg) *dns.Msg
 	}
 	// Never leak unresolvable RFC 1918 / private PTR queries to WAN upstreams (RFC 6303).
 	// Terminate locally with an authoritative NXDOMAIN response.
+	soaZone := "in-addr.arpa."
+	if strings.HasSuffix(strings.ToLower(dns.Fqdn(cDomainName)), ".ip6.arpa.") {
+		soaZone = "ip6.arpa."
+	}
+	ctrld.Log(ctx, mainLog.Load().Info(), "private PTR lookup %s not found in client info table, returning local NXDOMAIN", cDomainName)
+	return localNegativeAnswer(msg, dns.RcodeNameError, soaZone, "lan.")
+}
+
+// localNegativeAnswer builds an authoritative negative answer (NXDOMAIN, or
+// NODATA when rcode is RcodeSuccess) carrying a synthetic SOA for zone in the
+// authority section, so clients cache it per RFC 2308. The SOA MNAME/RNAME
+// live under mnameZone (firewalla.<mnameZone>).
+func localNegativeAnswer(msg *dns.Msg, rcode int, zone, mnameZone string) *dns.Msg {
 	answer := new(dns.Msg)
-	answer.SetRcode(msg, dns.RcodeNameError)
+	answer.SetRcode(msg, rcode)
 	answer.Authoritative = true
 	answer.RecursionAvailable = true
 	answer.Compress = true
-	soaZone := "in-addr.arpa."
-	lower := strings.ToLower(cDomainName)
-	if strings.HasSuffix(lower, ".ip6.arpa.") || strings.HasSuffix(lower, ".ip6.arpa") {
-		soaZone = "ip6.arpa."
-	}
 	answer.Ns = []dns.RR{&dns.SOA{
 		Hdr: dns.RR_Header{
-			Name:   soaZone,
+			Name:   zone,
 			Rrtype: dns.TypeSOA,
 			Class:  dns.ClassINET,
-			Ttl:    60,
+			Ttl:    uint32(localTTL.Seconds()),
 		},
-		Ns:      "firewalla.lan.",
-		Mbox:    "hostmaster.firewalla.lan.",
+		Ns:      "firewalla." + mnameZone,
+		Mbox:    "hostmaster.firewalla." + mnameZone,
 		Serial:  1,
 		Refresh: 60,
 		Retry:   30,
 		Expire:  86400,
-		Minttl:  60,
+		Minttl:  uint32(localTTL.Seconds()),
 	}}
-	ctrld.Log(ctx, mainLog.Load().Info(), "private PTR lookup %s not found in client info table, returning local NXDOMAIN", cDomainName)
 	return answer
+}
+
+// lanSuffixZone returns the LAN zone (with trailing dot) that a lowercased,
+// dot-trimmed name belongs to, or "" if it has no LAN suffix.
+func lanSuffixZone(lower string) string {
+	for _, z := range []string{"lan", "local", "home.arpa", "domain"} {
+		if strings.HasSuffix(lower, "."+z) {
+			return z + "."
+		}
+	}
+	return ""
 }
 
 func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg {
@@ -655,10 +673,8 @@ func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg
 	if lower == "" {
 		return nil
 	}
-	isLanSuffix := strings.HasSuffix(lower, ".lan") ||
-		strings.HasSuffix(lower, ".local") ||
-		strings.HasSuffix(lower, ".home.arpa") ||
-		strings.HasSuffix(lower, ".domain")
+	zone := lanSuffixZone(lower)
+	isLanSuffix := zone != ""
 	isSingleLabel := !strings.Contains(lower, ".")
 
 	if !isLanSuffix && !isSingleLabel {
@@ -734,67 +750,21 @@ func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg
 		}
 	}
 
-	soaZone := "lan."
-	if strings.HasSuffix(lower, ".local") {
-		soaZone = "local."
-	} else if strings.HasSuffix(lower, ".home.arpa") {
-		soaZone = "home.arpa."
-	} else if strings.HasSuffix(lower, ".domain") {
-		soaZone = "domain."
+	// Dotless names are answered under the lan. zone.
+	if zone == "" {
+		zone = "lan."
 	}
 
-	// 2. Host exists, but does not have the requested record type (NODATA / RFC 2308):
-	// Returns NOERROR, Authoritative, RecursionAvailable, with synthetic SOA in Authority section.
+	// 2. Host exists, but does not have the requested record type (NODATA / RFC 2308).
 	if exists {
-		answer := new(dns.Msg)
-		answer.SetReply(msg)
-		answer.Authoritative = true
-		answer.RecursionAvailable = true
-		answer.Compress = true
-		answer.Ns = []dns.RR{&dns.SOA{
-			Hdr: dns.RR_Header{
-				Name:   soaZone,
-				Rrtype: dns.TypeSOA,
-				Class:  dns.ClassINET,
-				Ttl:    60,
-			},
-			Ns:      "firewalla." + soaZone,
-			Mbox:    "hostmaster.firewalla." + soaZone,
-			Serial:  1,
-			Refresh: 60,
-			Retry:   30,
-			Expire:  86400,
-			Minttl:  60,
-		}}
 		ctrld.Log(ctx, mainLog.Load().Info(), "lan hostname query %s exists in client info table, returning local NODATA for type %d", q.Name, q.Qtype)
-		return answer
+		return localNegativeAnswer(msg, dns.RcodeSuccess, zone, zone)
 	}
 
-	// Host does NOT exist in client info table.
-	// Never leak unresolvable .lan, .local, .home.arpa, .domain, or single-label queries to WAN upstreams.
-	// Terminate locally with an authoritative NXDOMAIN response with synthetic SOA (RFC 2308 / RFC 7085).
-	answer := new(dns.Msg)
-	answer.SetRcode(msg, dns.RcodeNameError)
-	answer.Authoritative = true
-	answer.RecursionAvailable = true
-	answer.Compress = true
-	answer.Ns = []dns.RR{&dns.SOA{
-		Hdr: dns.RR_Header{
-			Name:   soaZone,
-			Rrtype: dns.TypeSOA,
-			Class:  dns.ClassINET,
-			Ttl:    60,
-		},
-		Ns:      "firewalla." + soaZone,
-		Mbox:    "hostmaster.firewalla." + soaZone,
-		Serial:  1,
-		Refresh: 60,
-		Retry:   30,
-		Expire:  86400,
-		Minttl:  60,
-	}}
+	// 3. Host does NOT exist in client info table. Never leak unresolvable LAN-suffix
+	// or single-label host lookups to WAN upstreams: answer NXDOMAIN locally.
 	ctrld.Log(ctx, mainLog.Load().Info(), "lan hostname query %s not found in client info table, returning local NXDOMAIN", q.Name)
-	return answer
+	return localNegativeAnswer(msg, dns.RcodeNameError, zone, zone)
 }
 
 func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
@@ -2036,11 +2006,7 @@ func isLanHostnameQueryMsg(m *dns.Msg, ciTable *clientinfo.Table) bool {
 	if name == "" {
 		return false
 	}
-	isLanSuffix := strings.HasSuffix(name, ".domain") ||
-		strings.HasSuffix(name, ".lan") ||
-		strings.HasSuffix(name, ".local") ||
-		strings.HasSuffix(name, ".home.arpa")
-	if isLanSuffix {
+	if lanSuffixZone(name) != "" {
 		return true
 	}
 	if q.Qtype == dns.TypeSRV {
@@ -2103,11 +2069,7 @@ func isLanHostname(name string) bool {
 	if name == "" {
 		return false
 	}
-	return !strings.Contains(name, ".") ||
-		strings.HasSuffix(name, ".domain") ||
-		strings.HasSuffix(name, ".lan") ||
-		strings.HasSuffix(name, ".local") ||
-		strings.HasSuffix(name, ".home.arpa")
+	return !strings.Contains(name, ".") || lanSuffixZone(name) != ""
 }
 
 // ipv4ServiceContinuityPrefix is the RFC 7335 IPv4 Service Continuity Prefix
