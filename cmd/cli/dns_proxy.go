@@ -230,7 +230,9 @@ func (p *prog) serveDNS(listenerNum string) error {
 		q := m.Question[0]
 		domain := canonicalName(q.Name)
 		switch {
-		case domain == "":
+		// The root name "." is a valid query name (RFC 1035 s3.1), e.g. ". NS" or
+		// ". DNSKEY" from a validating resolver, so only a truly empty name is FORMERR.
+		case domain == "" && q.Name != ".":
 			answer := new(dns.Msg)
 			answer.SetRcode(m, dns.RcodeFormatError)
 			_ = w.WriteMsg(answer)
@@ -654,7 +656,7 @@ func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg
 	//   the IP or a local NODATA response, preventing unnecessary leaks to upstream for local machines.
 	if isSingleLabel && !isLanSuffix && !exists {
 		switch q.Qtype {
-		case dns.TypeA, dns.TypeAAAA, 65 /* TypeHTTPS */, 64 /* TypeSVCB */:
+		case dns.TypeA, dns.TypeAAAA, dns.TypeHTTPS, dns.TypeSVCB:
 		default:
 			return nil
 		}
@@ -764,6 +766,9 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	}
 
 	var staleAnswer *dns.Msg
+	// staleExpire is the cache expiry of the entry staleAnswer came from, so the
+	// RFC 8767 maximum stale age is measured on that same entry.
+	var staleExpire time.Time
 	var (
 		dns64Prefix netip.Prefix
 		dns64Active bool
@@ -887,6 +892,10 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			answer, stale, hit, dns64Hit, dns64Bypass := p.cachedResponse(req.msg, upstream, dns64Prefix, dns64Active, now)
 			if stale != nil {
 				staleAnswer = stale
+				staleExpire = time.Time{}
+				if exp, ok := p.cachedExpireTime(req.msg, upstream, dns64Prefix, dns64Active); ok {
+					staleExpire = exp
+				}
 			}
 			if dns64Bypass {
 				ctrld.Log(ctx, mainLog.Load().Debug(), "dns64: bypassing cached empty-AAAA answer for synthesis")
@@ -1164,7 +1173,9 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			if answer == nil {
 				if serveStaleCache && staleAnswer != nil {
 					// RFC 8767: serve stale only upon failure of upstream resolution, capped by maxStaleAge.
-					if exp, ok := p.cachedExpireTime(req.msg, upstreams[n], dns64Prefix, dns64Active); !ok || time.Since(exp) <= maxStaleAge {
+					// The age is that of the entry staleAnswer came from, which may belong to another
+					// upstream than upstreams[n]; an entry of unknown age is not served.
+					if !staleExpire.IsZero() && time.Since(staleExpire) <= maxStaleAge {
 						ctrld.Log(ctx, mainLog.Load().Debug(), "serving stale cached response")
 						p.health.countCacheHit()
 						now := time.Now()
@@ -1510,8 +1521,17 @@ func setCachedAnswerTTL(answer *dns.Msg, now, expiredTime time.Time) {
 }
 
 func ttlFromMsg(msg *dns.Msg) uint32 {
-	for _, rr := range msg.Answer {
-		return rr.Header().Ttl
+	// RFC 1035 s3.2.1 / RFC 2181 s8: a cached answer must not outlive any of its
+	// records, so use the smallest TTL of the answer section. In a CNAME chain the
+	// first record (the CNAME) often has a long TTL and the final A/AAAA a short one.
+	if len(msg.Answer) > 0 {
+		ttl := msg.Answer[0].Header().Ttl
+		for _, rr := range msg.Answer[1:] {
+			if t := rr.Header().Ttl; t < ttl {
+				ttl = t
+			}
+		}
+		return ttl
 	}
 	for _, rr := range msg.Ns {
 		// RFC 2308 section 5: negative caching TTL is min(SOA TTL, SOA MINIMUM).
@@ -1977,8 +1997,9 @@ func isLanHostnameQueryMsg(m *dns.Msg, ciTable *clientinfo.Table) bool {
 	}
 	// For dotless single-label names (e.g. "wpad", "laptop", "com"):
 	if !strings.Contains(name, ".") {
-		// Infrastructure and DNSSEC queries (DS, DNSKEY, NS, SOA, RRSIG, NSEC, NSEC3, etc.)
+		// DNSSEC delegation types (DS, DNSKEY, RRSIG, NSEC, NSEC3, NSEC3PARAM, CDS, CDNSKEY)
 		// must ALWAYS pass through to upstream resolvers even if a local device announced a TLD name.
+		// NS and SOA are not in that list: for an existing local host they get a local NODATA.
 		if isDNSSECInfraType(q.Qtype) {
 			return false
 		}
@@ -1995,10 +2016,10 @@ func isLanHostnameQueryMsg(m *dns.Msg, ciTable *clientinfo.Table) bool {
 		}
 		// If host is not in ciTable, only intercept host-lookup queries (A, AAAA, HTTPS, SVCB)
 		// to contain local host probes (e.g. "wpad", "zzzqq-nope").
-		// Infrastructure and DNSSEC queries (DS, DNSKEY, NS, SOA, RRSIG, etc.) against TLDs (e.g. "com", "net")
-		// must pass through to upstream resolvers.
+		// Every other type for a name that is not a local host (TLDs such as "com" or "net"
+		// included) passes through to upstream resolvers.
 		switch q.Qtype {
-		case dns.TypeA, dns.TypeAAAA, 65 /* TypeHTTPS */, 64 /* TypeSVCB */:
+		case dns.TypeA, dns.TypeAAAA, dns.TypeHTTPS, dns.TypeSVCB:
 			return true
 		default:
 			return false

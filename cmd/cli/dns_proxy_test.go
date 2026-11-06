@@ -1273,7 +1273,33 @@ func Test_RFCCompliance_CacheAndTTL(t *testing.T) {
 	ttlNXSecs := time.Until(cvNX.Expire).Seconds()
 	assert.True(t, ttlNXSecs <= float64(negativeCacheMaxTTL)+0.1, "Negative cache should be capped at negativeCacheMaxTTL (60s); got %f", ttlNXSecs)
 
-	// 5. Constants verification
+	// 5. RFC 1035/2181: CNAME chains use the smallest TTL of the answer section,
+	// never the TTL of the first record.
+	chain := func(cnameTTL, aTTL uint32) *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion("www.chain.com.", dns.TypeA)
+		m.Answer = append(m.Answer,
+			&dns.CNAME{Hdr: dns.RR_Header{Name: "www.chain.com.", Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: cnameTTL}, Target: "edge.chain.net."},
+			&dns.A{Hdr: dns.RR_Header{Name: "edge.chain.net.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: aTTL}, A: net.ParseIP("203.0.113.20")},
+		)
+		return m
+	}
+	assert.Equal(t, uint32(20), ttlFromMsg(chain(3600, 20)), "long CNAME + short A must use the A's TTL")
+	assert.Equal(t, uint32(30), ttlFromMsg(chain(30, 300)), "short CNAME + long A must use the CNAME's TTL")
+
+	cache.Purge()
+	ansChain := chain(3600, 20)
+	keyChain := dnscache.NewKey(ansChain, "upstream.0")
+	p.addCachedResponse(keyChain, ansChain)
+	cvChain := cache.Get(keyChain)
+	require.NotNil(t, cvChain)
+	ttlChainSecs := time.Until(cvChain.Expire).Seconds()
+	assert.True(t, ttlChainSecs <= 20.1, "CNAME chain must be cached no longer than its shortest record (20s); got %f", ttlChainSecs)
+	for _, rr := range ansChain.Answer {
+		assert.LessOrEqual(t, rr.Header().Ttl, uint32(20), "delivered TTL of %s must not exceed the shortest record TTL", rr.Header().Name)
+	}
+
+	// 6. Constants verification
 	assert.Equal(t, 30*time.Second, staleTTL, "RFC 8767: recommended staleTTL is 30s")
 	assert.Equal(t, 24*time.Hour, maxStaleAge, "RFC 8767: maxStaleAge should be 24h")
 }

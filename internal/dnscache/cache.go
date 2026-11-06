@@ -23,6 +23,12 @@ type Cacher interface {
 // subnet is never served to a client in a different subnet. Answer records are
 // scoped to the network that generated them (RFC 7871 §7.3), so they must not
 // be shared across subnets even when the question is otherwise identical.
+//
+// DO and CD partition it by the DNSSEC bits of the request: an answer fetched
+// without DO carries no RRSIGs and must not be served to a client that asked for
+// them (RFC 4035 s3.2.1), nor a signed answer to one that did not (RFC 3225 s3);
+// an answer fetched with CD (validation disabled upstream) must not be served to a
+// client that relies on upstream validation (RFC 4035 s3.2.2).
 type Key struct {
 	Qtype    uint16
 	Qclass   uint16
@@ -30,6 +36,8 @@ type Key struct {
 	Upstream string
 	ECS      string
 	Variant  string
+	DO       bool
+	CD       bool
 }
 
 type Value struct {
@@ -69,7 +77,11 @@ func NewLRUCache(size int) (*LRUCache, error) {
 // NewKey creates a new cache key for given DNS message.
 func NewKey(msg *dns.Msg, upstream string) Key {
 	q := msg.Question[0]
-	return Key{Qtype: q.Qtype, Qclass: q.Qclass, Name: normalizeQname(q.Name), Upstream: upstream, ECS: CanonicalECS(msg)}
+	do := false
+	if opt := msg.IsEdns0(); opt != nil {
+		do = opt.Do()
+	}
+	return Key{Qtype: q.Qtype, Qclass: q.Qclass, Name: normalizeQname(q.Name), Upstream: upstream, ECS: CanonicalECS(msg), DO: do, CD: msg.CheckingDisabled}
 }
 
 // NewVariantKey creates a cache key in a named result variant. Variants keep

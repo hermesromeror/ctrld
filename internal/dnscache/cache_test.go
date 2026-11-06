@@ -26,6 +26,37 @@ func msgWithECS(name string, family uint16, prefix uint8, addr string) *dns.Msg 
 	return m
 }
 
+// TestNewKey_DNSSECBitsPartition checks that the DO and CD bits of the request
+// partition the cache (RFC 4035 s3.2.1/s3.2.2, RFC 3225 s3), while an EDNS OPT
+// without DO shares the partition of a query without EDNS.
+func TestNewKey_DNSSECBitsPartition(t *testing.T) {
+	plain := new(dns.Msg)
+	plain.SetQuestion("example.com.", dns.TypeA)
+
+	ednsNoDO := new(dns.Msg)
+	ednsNoDO.SetQuestion("example.com.", dns.TypeA)
+	ednsNoDO.SetEdns0(1232, false)
+
+	withDO := new(dns.Msg)
+	withDO.SetQuestion("example.com.", dns.TypeA)
+	withDO.SetEdns0(1232, true)
+
+	withCD := new(dns.Msg)
+	withCD.SetQuestion("example.com.", dns.TypeA)
+	withCD.CheckingDisabled = true
+
+	kPlain := NewKey(plain, "upstream.0")
+	if got := NewKey(ednsNoDO, "upstream.0"); got != kPlain {
+		t.Errorf("EDNS without DO must share the plain partition: %+v vs %+v", got, kPlain)
+	}
+	if got := NewKey(withDO, "upstream.0"); got == kPlain || !got.DO {
+		t.Errorf("DO query must use its own partition: %+v", got)
+	}
+	if got := NewKey(withCD, "upstream.0"); got == kPlain || !got.CD {
+		t.Errorf("CD query must use its own partition: %+v", got)
+	}
+}
+
 // answerWithA builds a cached answer holding a single A record with the given address.
 func answerWithA(name, a string) *dns.Msg {
 	m := new(dns.Msg)
