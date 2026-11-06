@@ -301,6 +301,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 		ci := p.getClientInfo(remoteIP, m)
 		ci.ClientIDPref = p.cfg.Service.ClientIDPref
 		stripClientSubnet(m)
+		stripDnsmasqMAC(m)
 		remoteAddr := spoofRemoteAddr(w.RemoteAddr(), ci)
 		fmtSrcToDest := fmtRemoteToLocal(listenerNum, ci.Hostname, remoteAddr.String())
 		t := time.Now()
@@ -1632,6 +1633,24 @@ func stripClientSubnet(msg *dns.Msg) {
 		opts := make([]dns.EDNS0, 0, len(opt.Option))
 		for _, s := range opt.Option {
 			if e, ok := s.(*dns.EDNS0_SUBNET); ok && (e.Address.IsPrivate() || e.Address.IsLoopback()) {
+				continue
+			}
+			opts = append(opts, s)
+		}
+		if len(opts) != len(opt.Option) {
+			opt.Option = opts
+		}
+	}
+}
+
+// stripDnsmasqMAC removes the dnsmasq EDNS0 MAC option (0xFDE9). ctrld has already read it
+// into the client info (getClientInfo), and upstream client info travels in HTTP headers,
+// so forwarding the full MAC to the upstream resolver only leaks it.
+func stripDnsmasqMAC(msg *dns.Msg) {
+	if opt := msg.IsEdns0(); opt != nil {
+		opts := make([]dns.EDNS0, 0, len(opt.Option))
+		for _, s := range opt.Option {
+			if e, ok := s.(*dns.EDNS0_LOCAL); ok && e.Code == EDNS0_OPTION_MAC {
 				continue
 			}
 			opts = append(opts, s)

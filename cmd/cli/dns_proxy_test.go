@@ -668,6 +668,55 @@ func Test_ipAndMacFromMsg(t *testing.T) {
 	}
 }
 
+func Test_stripDnsmasqMAC(t *testing.T) {
+	// Case 1: msg without OPT
+	m1 := new(dns.Msg)
+	m1.SetQuestion("example.com.", dns.TypeA)
+	stripDnsmasqMAC(m1)
+	if m1.IsEdns0() != nil {
+		t.Errorf("expected no OPT record")
+	}
+
+	// Case 2: msg with OPT but no options
+	m2 := new(dns.Msg)
+	m2.SetQuestion("example.com.", dns.TypeA)
+	o2 := &dns.OPT{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT}}
+	m2.Extra = append(m2.Extra, o2)
+	stripDnsmasqMAC(m2)
+	if len(m2.IsEdns0().Option) != 0 {
+		t.Errorf("expected 0 options")
+	}
+
+	// Case 3: msg with 0xFDE9, private subnet, other local option, and cookie
+	m3 := new(dns.Msg)
+	m3.SetQuestion("example.com.", dns.TypeA)
+	o3 := &dns.OPT{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT}}
+	hw, _ := net.ParseMAC("aa:bb:cc:dd:ee:ff")
+	ecMAC := &dns.EDNS0_LOCAL{Code: EDNS0_OPTION_MAC, Data: hw}
+	ecOther := &dns.EDNS0_LOCAL{Code: 0xFDEA, Data: []byte("keep-me")}
+	ecSubnet := &dns.EDNS0_SUBNET{Address: net.ParseIP("192.168.20.87")}
+	ecCookie := &dns.EDNS0_COOKIE{Cookie: "abcdef1234567890"}
+	o3.Option = append(o3.Option, ecMAC, ecSubnet, ecOther, ecCookie)
+	m3.Extra = append(m3.Extra, o3)
+
+	stripClientSubnet(m3)
+	stripDnsmasqMAC(m3)
+
+	opt := m3.IsEdns0()
+	if opt == nil {
+		t.Fatalf("expected OPT record to be present")
+	}
+	if len(opt.Option) != 2 {
+		t.Fatalf("expected 2 options remaining, got %d", len(opt.Option))
+	}
+	if local, ok := opt.Option[0].(*dns.EDNS0_LOCAL); !ok || local.Code != 0xFDEA {
+		t.Errorf("expected first option to be EDNS0_LOCAL 0xFDEA, got %v", opt.Option[0])
+	}
+	if _, ok := opt.Option[1].(*dns.EDNS0_COOKIE); !ok {
+		t.Errorf("expected second option to be EDNS0_COOKIE, got %v", opt.Option[1])
+	}
+}
+
 func Test_remoteAddrFromMsg(t *testing.T) {
 	loopbackIP := net.ParseIP("127.0.0.1")
 	tests := []struct {
