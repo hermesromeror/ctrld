@@ -47,12 +47,71 @@ sudo cp -p /data/controld/ctrld.bak-patched-v3.15-minmem /data/controld/ctrld
 sudo systemctl restart ctrld
 ```
 
-## 4. Configuración clave
+## 4. Configuración (`/data/controld/ctrld.toml`, 2026-11-05)
 
-- Caché: `cache_size = 4096`, `cache_serve_stale = true`. **Sin** `cache_ttl_override` (alargaba TTL, contra el RFC).
-- `failover_rcodes = ['SERVFAIL', 'REFUSED']`, `timeout = 1500` ms por upstream.
-- Red: `192.168.1/2/10/20/30/40/50.0/24`, `10.200.152.0/24`, `10.38.182.0/24`.
-- Descubrimiento: ARP y DHCP activos; mDNS y PTR inactivos.
+```toml
+[service]
+  log_level = 'info'
+  log_path = '/data/controld/ctrld.log'
+  log_max_size_mb = 20
+  log_max_backups = 2
+  cache_enable = true
+  cache_size = 4096
+  cache_serve_stale = true
+  cache_flush_domains = []
+  dhcp_lease_file_path = ''
+  dhcp_lease_file_format = ''
+  discover_mdns = false
+  discover_arp = true
+  discover_dhcp = true
+  discover_ptr = false
+
+[listener]
+  [listener.0]
+    ip = '192.168.1.1'
+    port = 5354
+
+    [listener.0.policy]
+      failover_rcodes = ['SERVFAIL', 'REFUSED']
+      networks = [
+        { 'network.0' = ['upstream.0', 'upstream.1', 'upstream.2'] }
+      ]
+
+[network]
+  [network.0]
+    name = 'My Home Networks'
+    cidrs = ['192.168.1.0/24', '192.168.2.0/24', '192.168.10.0/24', '192.168.20.0/24', '192.168.30.0/24', '192.168.40.0/24', '192.168.50.0/24', '10.200.152.0/24', '10.38.182.0/24']
+
+[upstream]
+  [upstream.0]
+    name = 'NextDNS'
+    type = 'doh3'
+    endpoint = 'https://dns.nextdns.io/d23c32'
+    bootstrap_ip = '45.90.28.0'
+    ip_stack = 'v4'
+    timeout = 1500
+
+  [upstream.1]
+    name = 'Cloudflare Families'
+    type = 'doh'
+    endpoint = 'https://family.cloudflare-dns.com/dns-query'
+    bootstrap_ip = '1.1.1.3'
+    ip_stack = 'v4'
+    timeout = 1500
+
+  [upstream.2]
+    name = 'Google DNS'
+    type = 'doh'
+    endpoint = 'https://dns.google/dns-query'
+    bootstrap_ip = '8.8.8.8'
+    ip_stack = 'v4'
+    timeout = 1500
+```
+
+Notas:
+- **Sin** `cache_ttl_override` a propósito: en ctrld esa opción alargaba los TTL cortos (contra el RFC). En v3.16 solo podría acortarlos.
+- `cache_size` mayor de 4096 se recorta a 4096 en el código.
+- `bootstrap_ip` es necesario: sin él ctrld tendría que resolver el nombre de cada upstream a través de sí mismo.
 
 ## 5. Comportamiento
 
