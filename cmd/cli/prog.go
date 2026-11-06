@@ -109,7 +109,6 @@ type prog struct {
 	apiForceReloadCh     chan struct{}
 	apiForceReloadGroup  singleflight.Group
 	inflightResolveGroup singleflight.Group
-	prefetchInFlight     sync.Map
 	logConn              net.Conn
 	logConnMu            sync.Mutex
 	cs                   *controlServer

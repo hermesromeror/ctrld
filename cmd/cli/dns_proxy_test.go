@@ -1184,3 +1184,96 @@ func Test_proxyLanHostnameQuery_ExistingHost_v310(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "lan.", soaSOA.Hdr.Name)
 }
+
+func Test_RFCCompliance_CacheAndTTL(t *testing.T) {
+	// 1. RFC 2308 section 5: ttlFromMsg uses min(SOA TTL, SOA MINIMUM)
+	msgNX1 := new(dns.Msg)
+	msgNX1.Rcode = dns.RcodeNameError
+	soa1 := &dns.SOA{
+		Hdr:    dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeSOA, Ttl: 300},
+		Minttl: 10,
+	}
+	msgNX1.Ns = append(msgNX1.Ns, soa1)
+	assert.Equal(t, uint32(10), ttlFromMsg(msgNX1), "RFC 2308: should use Minttl when smaller than SOA TTL")
+
+	msgNX2 := new(dns.Msg)
+	msgNX2.Rcode = dns.RcodeNameError
+	soa2 := &dns.SOA{
+		Hdr:    dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeSOA, Ttl: 5},
+		Minttl: 60,
+	}
+	msgNX2.Ns = append(msgNX2.Ns, soa2)
+	assert.Equal(t, uint32(5), ttlFromMsg(msgNX2), "RFC 2308: should use SOA TTL when smaller than Minttl")
+
+	// 2. Positive answer ttlFromMsg
+	msgA := new(dns.Msg)
+	msgA.Rcode = dns.RcodeSuccess
+	rrA := &dns.A{
+		Hdr: dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeA, Ttl: 5},
+		A:   net.ParseIP("93.184.216.34"),
+	}
+	msgA.Answer = append(msgA.Answer, rrA)
+	assert.Equal(t, uint32(5), ttlFromMsg(msgA))
+
+	// 3. RFC 1035/2181 + Cap-only Override in addCachedResponseWithMaxTTL
+	cache, err := dnscache.NewLRUCache(100)
+	require.NoError(t, err)
+	p := &prog{
+		cfg:   &ctrld.Config{Service: ctrld.ServiceConfig{}},
+		cache: cache,
+	}
+	reqMsg := new(dns.Msg)
+	reqMsg.SetQuestion("short-ttl.com.", dns.TypeA)
+	key := dnscache.NewKey(reqMsg, "upstream.0")
+
+	// 3a. Natural TTL = 5s, CacheTTLOverride = 120s -> NEVER lengthen natural TTL (must stay 5s)
+	p.cfg.Service.CacheTTLOverride = 120
+	ans5 := new(dns.Msg)
+	ans5.SetQuestion("short-ttl.com.", dns.TypeA)
+	ans5.Answer = append(ans5.Answer, &dns.A{
+		Hdr: dns.RR_Header{Name: "short-ttl.com.", Rrtype: dns.TypeA, Ttl: 5},
+		A:   net.ParseIP("1.2.3.4"),
+	})
+	p.addCachedResponse(key, ans5)
+	cv := cache.Get(key)
+	require.NotNil(t, cv)
+	ttlSecs := time.Until(cv.Expire).Seconds()
+	assert.True(t, ttlSecs <= 5.1 && ttlSecs >= 4.0, "Natural TTL 5s must NOT be lengthened by override 120s; got %f", ttlSecs)
+	assert.Equal(t, uint32(5), ans5.Answer[0].Header().Ttl, "Delivered TTL to client must not exceed natural TTL")
+
+	// 3b. Natural TTL = 300s, CacheTTLOverride = 120s -> Capped at 120s
+	cache.Purge()
+	ans300 := new(dns.Msg)
+	ans300.SetQuestion("long-ttl.com.", dns.TypeA)
+	ans300.Answer = append(ans300.Answer, &dns.A{
+		Hdr: dns.RR_Header{Name: "long-ttl.com.", Rrtype: dns.TypeA, Ttl: 300},
+		A:   net.ParseIP("1.2.3.4"),
+	})
+	keyLong := dnscache.NewKey(ans300, "upstream.0")
+	p.addCachedResponse(keyLong, ans300)
+	cvLong := cache.Get(keyLong)
+	require.NotNil(t, cvLong)
+	ttlLongSecs := time.Until(cvLong.Expire).Seconds()
+	assert.True(t, ttlLongSecs <= 120.1 && ttlLongSecs >= 119.0, "Long TTL 300s must be capped at override 120s; got %f", ttlLongSecs)
+
+	// 4. RFC 2308 negative cache capping
+	cache.Purge()
+	p.cfg.Service.CacheTTLOverride = 0
+	msgNXLong := new(dns.Msg)
+	msgNXLong.Rcode = dns.RcodeNameError
+	msgNXLong.SetQuestion("nonexistent.com.", dns.TypeA)
+	msgNXLong.Ns = append(msgNXLong.Ns, &dns.SOA{
+		Hdr:    dns.RR_Header{Name: "nonexistent.com.", Rrtype: dns.TypeSOA, Ttl: 1800},
+		Minttl: 1800,
+	})
+	keyNX := dnscache.NewKey(msgNXLong, "upstream.0")
+	p.addCachedResponse(keyNX, msgNXLong)
+	cvNX := cache.Get(keyNX)
+	require.NotNil(t, cvNX)
+	ttlNXSecs := time.Until(cvNX.Expire).Seconds()
+	assert.True(t, ttlNXSecs <= float64(negativeCacheMaxTTL)+0.1, "Negative cache should be capped at negativeCacheMaxTTL (60s); got %f", ttlNXSecs)
+
+	// 5. Constants verification
+	assert.Equal(t, 30*time.Second, staleTTL, "RFC 8767: recommended staleTTL is 30s")
+	assert.Equal(t, 24*time.Hour, maxStaleAge, "RFC 8767: maxStaleAge should be 24h")
+}

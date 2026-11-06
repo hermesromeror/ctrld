@@ -30,11 +30,10 @@ import (
 )
 
 const (
-	staleTTL            = 60 * time.Second
+	staleTTL            = 30 * time.Second // RFC 8767 section 4: recommended 30 seconds
+	maxStaleAge         = 24 * time.Hour   // RFC 8767 section 5: recommended max stale age (1-3 days)
 	localTTL            = 60 * time.Second
 	negativeCacheMaxTTL = 60
-	prefetchThreshold   = 45 * time.Second
-	swrMaxStaleAge      = 5 * time.Minute
 	fallbackCacheMaxTTL = 60
 	// zpaDNSEchoDomain is Zscaler Client Connector's fixed public health-check
 	// name. Client Connector must see the answer to it arrive on its own DNS
@@ -136,19 +135,16 @@ func (p *prog) addCachedResponseWithMaxTTL(key dnscache.Key, answer *dns.Msg, ma
 	if maxTTL > 0 && ttl > maxTTL {
 		ttl = maxTTL
 	}
+	// If CacheTTLOverride is configured, it acts as a ceiling/cap (RFC 1035/2181), never lengthening natural TTL.
+	if override := p.cfg.Service.CacheTTLOverride; override > 0 && ttl > uint32(override) {
+		ttl = uint32(override)
+	}
+	// RFC 2308 s5: negative caching TTL is min(SOA TTL, SOA MINIMUM), capped at negativeCacheMaxTTL.
+	if answer.Rcode == dns.RcodeNameError && ttl > negativeCacheMaxTTL {
+		ttl = negativeCacheMaxTTL
+	}
 	now := time.Now()
 	expired := now.Add(time.Duration(ttl) * time.Second)
-	if cachedTTL := p.cfg.Service.CacheTTLOverride; cachedTTL > 0 {
-		if maxTTL > 0 && cachedTTL > int(maxTTL) {
-			cachedTTL = int(maxTTL)
-		}
-		if answer.Rcode == dns.RcodeNameError && cachedTTL > negativeCacheMaxTTL {
-			cachedTTL = negativeCacheMaxTTL
-		}
-		expired = now.Add(time.Duration(cachedTTL) * time.Second)
-	} else if answer.Rcode == dns.RcodeNameError && ttl > negativeCacheMaxTTL {
-		expired = now.Add(time.Duration(negativeCacheMaxTTL) * time.Second)
-	}
 	setCachedAnswerTTL(answer, now, expired)
 	p.cache.Add(key, dnscache.NewValue(answer.Copy(), expired))
 }
@@ -166,43 +162,6 @@ func (p *prog) cachedExpireTime(req *dns.Msg, upstream string, dns64Prefix netip
 		return cv.Expire, true
 	}
 	return time.Time{}, false
-}
-
-func (p *prog) refreshCacheAsync(req *proxyRequest, upstream string, upstreamCfg *ctrld.UpstreamConfig) {
-	if p.cache == nil || upstreamCfg == nil || req == nil || req.msg == nil || len(req.msg.Question) == 0 {
-		return
-	}
-	cacheKey := dnscache.NewKey(req.msg, upstream)
-	sfKey := fmt.Sprintf("%s|%d|%d|%s|%s", upstream, cacheKey.Qtype, cacheKey.Qclass, cacheKey.Name, cacheKey.ECS)
-	if _, loaded := p.prefetchInFlight.LoadOrStore(sfKey, struct{}{}); loaded {
-		return
-	}
-	msgCopy := req.msg.Copy()
-	ci := req.ci
-	go func() {
-		defer p.prefetchInFlight.Delete(sfKey)
-		bgCtx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, requestID())
-		if upstreamCfg.UpstreamSendClientInfo() && ci != nil {
-			bgCtx = context.WithValue(bgCtx, ctrld.ClientInfoCtxKey{}, ci)
-		}
-		dnsResolver, err := ctrld.NewResolver(upstreamCfg)
-		if err != nil {
-			return
-		}
-		resolveCtx, cancel := upstreamCfg.Context(bgCtx)
-		defer cancel()
-		fresh, err := dnsResolver.Resolve(resolveCtx, msgCopy)
-		if err != nil || fresh == nil || !sameQuestion(msgCopy, fresh) {
-			return
-		}
-		if fresh.Rcode != dns.RcodeSuccess && fresh.Rcode != dns.RcodeNameError {
-			return
-		}
-		p.um.noteSuccess(upstream)
-		fresh.Compress = true
-		p.addCachedResponse(cacheKey, fresh)
-		ctrld.Log(bgCtx, mainLog.Load().Debug(), "background cache refresh updated %s via %s", cacheKey.Name, upstream)
-	}()
 }
 
 func (p *prog) cachedResponse(req *dns.Msg, upstream string, dns64Prefix netip.Prefix, dns64Active bool, now time.Time) (answer, stale *dns.Msg, hit, dns64Hit, dns64Bypass bool) {
@@ -805,6 +764,10 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	}
 
 	var staleAnswer *dns.Msg
+	var (
+		dns64Prefix netip.Prefix
+		dns64Active bool
+	)
 	upstreams := req.ufr.upstreams
 	serveStaleCache := p.cache != nil && p.cfg.Service.CacheServeStale
 	upstreamConfigs := p.upstreamConfigsFromUpstreamNumbers(upstreams)
@@ -916,19 +879,10 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	}
 
 	if cacheable {
-		dns64Prefix, dns64Active := netip.Prefix{}, false
 		if req.msg.Question[0].Qtype == dns.TypeAAAA {
 			dns64Prefix, dns64Active = p.activeDNS64Prefix()
 		}
 		now := time.Now()
-		var refreshUpstream string
-		if len(upstreams) > 0 {
-			refreshUpstream = upstreams[0]
-		}
-		var refreshCfg *ctrld.UpstreamConfig
-		if len(upstreamConfigs) > 0 {
-			refreshCfg = upstreamConfigs[0]
-		}
 		for _, upstream := range upstreams {
 			answer, stale, hit, dns64Hit, dns64Bypass := p.cachedResponse(req.msg, upstream, dns64Prefix, dns64Active, now)
 			if stale != nil {
@@ -938,28 +892,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				ctrld.Log(ctx, mainLog.Load().Debug(), "dns64: bypassing cached empty-AAAA answer for synthesis")
 			}
 			if !hit {
-				// Stale-While-Revalidate (SWR): if cache_serve_stale is enabled and the entry
-				// expired within swrMaxStaleAge, serve the stale record immediately and refresh
-				// it asynchronously in the background.
-				if serveStaleCache && stale != nil && !dns64Bypass {
-					if exp, ok := p.cachedExpireTime(req.msg, upstream, dns64Prefix, dns64Active); ok && now.Sub(exp) <= swrMaxStaleAge {
-						ctrld.Log(ctx, mainLog.Load().Debug(), "serving stale-while-revalidate cached response")
-						p.health.countCacheHit()
-						setCachedAnswerTTL(stale, now, now.Add(staleTTL))
-						if refreshUpstream != "" {
-							p.refreshCacheAsync(req, refreshUpstream, refreshCfg)
-						}
-						res.answer = stale
-						res.cached = true
-						return res
-					}
-				}
 				continue
-			}
-			if exp, ok := p.cachedExpireTime(req.msg, upstream, dns64Prefix, dns64Active); ok && exp.Sub(now) <= prefetchThreshold {
-				if refreshUpstream != "" {
-					p.refreshCacheAsync(req, refreshUpstream, refreshCfg)
-				}
 			}
 			if dns64Hit {
 				ctrld.Log(ctx, mainLog.Load().Debug(), "dns64: hit cached response variant")
@@ -1230,13 +1163,16 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			answer := resolve(upstreams[n], upstreamConfig, req.msg)
 			if answer == nil {
 				if serveStaleCache && staleAnswer != nil {
-					ctrld.Log(ctx, mainLog.Load().Debug(), "serving stale cached response")
-					p.health.countCacheHit()
-					now := time.Now()
-					setCachedAnswerTTL(staleAnswer, now, now.Add(staleTTL))
-					res.answer = staleAnswer
-					res.cached = true
-					return res
+					// RFC 8767: serve stale only upon failure of upstream resolution, capped by maxStaleAge.
+					if exp, ok := p.cachedExpireTime(req.msg, upstreams[n], dns64Prefix, dns64Active); !ok || time.Since(exp) <= maxStaleAge {
+						ctrld.Log(ctx, mainLog.Load().Debug(), "serving stale cached response")
+						p.health.countCacheHit()
+						now := time.Now()
+						setCachedAnswerTTL(staleAnswer, now, now.Add(staleTTL))
+						res.answer = staleAnswer
+						res.cached = true
+						return res
+					}
 				}
 				continue
 			}
@@ -1578,6 +1514,14 @@ func ttlFromMsg(msg *dns.Msg) uint32 {
 		return rr.Header().Ttl
 	}
 	for _, rr := range msg.Ns {
+		// RFC 2308 section 5: negative caching TTL is min(SOA TTL, SOA MINIMUM).
+		if soa, ok := rr.(*dns.SOA); ok {
+			ttl := soa.Header().Ttl
+			if soa.Minttl < ttl {
+				ttl = soa.Minttl
+			}
+			return ttl
+		}
 		return rr.Header().Ttl
 	}
 	return 0
