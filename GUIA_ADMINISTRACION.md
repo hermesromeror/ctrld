@@ -1,10 +1,10 @@
 # Guía de administración: ctrld + NextDNS en Firewalla Gold
 
-Actualizada: 2026-11-05 (v3.16). Copia en el router: `/data/controld/GUIA_ADMINISTRACION.md`.
+Actualizada: 2026-11-06 (v3.17). Copia en el router: `/data/controld/GUIA_ADMINISTRACION.md`.
 
 ## 1. Estado
 
-- **Versión:** `v1.5.9+patched-v3.16-minmem` (ctrld oficial v1.5.9 + parches propios).
+- **Versión:** `v1.5.9+patched-v3.17-minmem` (ctrld oficial v1.5.9 + parches propios).
 - **Upstreams:** NextDNS `d23c32` por DoH3 → Cloudflare Families (DoH) → Quad9 (DoH) → AT&T (UDP 53, último recurso). Control D ya no se usa.
 - **Panel:** https://my.nextdns.io/d23c32 ("Cache Boost" desactivado).
 
@@ -14,7 +14,7 @@ Actualizada: 2026-11-05 (v3.16). Copia en el router: `/data/controld/GUIA_ADMINI
 | :--- | :--- |
 | Configuración | `/data/controld/ctrld.toml` (root 0600) |
 | Binario | `/data/controld/ctrld` |
-| Respaldos | `ctrld.bak-patched-v3.15-minmem`, `ctrld.bak-patched-v3.14-minmem` |
+| Respaldos | `ctrld.bak-patched-v3.16-minmem`, `ctrld.bak-patched-v3.15-minmem`, `ctrld.bak-patched-v3.14-minmem` |
 | Unidad systemd permanente | `/data/controld/ctrld.service` (`RestartSec=10`) |
 | Script de arranque | `/home/pi/.firewalla/config/post_main.d/start_ctrld.sh` |
 | Log | `/data/controld/ctrld.log` |
@@ -40,10 +40,10 @@ sudo nano /data/controld/ctrld.toml
 sudo systemctl restart ctrld
 ```
 
-Revertir a v3.15:
+Revertir a v3.16:
 
 ```bash
-sudo cp -p /data/controld/ctrld.bak-patched-v3.15-minmem /data/controld/ctrld
+sudo cp -p /data/controld/ctrld.bak-patched-v3.16-minmem /data/controld/ctrld
 sudo systemctl restart ctrld
 ```
 
@@ -129,12 +129,12 @@ Notas:
 - **Respuestas caducadas:** solo si falla el upstream, con TTL 30 s y hasta 24 h después de expirar.
 - **Respaldos:** lo que responde Cloudflare, Quad9 o AT&T se cachea 60 s como máximo.
 - **Filtrado:** el perfil de NextDNS aplica a toda la red (bloquea, entre otras cosas, consultas NS/DS/DNSKEY a `com`, `net`… y `*.duckdns.org`).
-- **Nombres locales (sin salir a internet):** equipos conocidos con o sin `.lan`, `.local`, `.home.arpa` → su IP (TTL 60 s); nombres que no existen y `wpad`/`isatap`/`gateway`/`localhost` → NXDOMAIN local; PTR de IP privadas → nombre o NXDOMAIN.
+- **Nombres locales (sin salir a internet):** equipos conocidos con o sin `.lan`, `.local`, `.home.arpa` → su IP (TTL 60 s); nombres que no existen y `wpad`/`isatap`/`gateway`/`localhost` → NXDOMAIN local; PTR de IP privadas → nombre o NXDOMAIN; consultas DNS-SD de los equipos Apple (`lb._dns-sd._udp.0.20.168.192.in-addr.arpa` y similares) en redes privadas → NXDOMAIN local (desde v3.17).
 - **Privacidad:** no se envían a los upstreams la MAC ni la subred privada. A NextDNS solo llegan nombre del equipo, IP privada y prefijo del fabricante.
 
-## 6. Estándares (v3.16)
+## 6. Estándares (v3.17)
 
-| Tema | v1.5.9 oficial | v3.16 | RFC |
+| Tema | v1.5.9 oficial | v3.17 | RFC |
 | :--- | :--- | :--- | :--- |
 | TTL de caché | TTL del primer registro | Menor TTL de la respuesta | 1035, 2181 |
 | `cache_ttl_override` | Reemplaza el TTL | Solo tope (y quitado) | 1035, 2181 |
@@ -143,6 +143,7 @@ Notas:
 | DNSSEC en caché | Mezcla DO/CD | Separa DO/CD | 4035, 3225 |
 | Consulta a la raíz | FORMERR | Se reenvía | 1035 |
 | PTR privados / `home.arpa` | Se reenvían si no se conocen | Respuesta local | 6303 / 8375 |
+| DNS-SD en zonas inversas privadas | Se reenvían | NXDOMAIN local (no en zonas superiores) | 6763 §11, 6303, 8020 |
 
 `.lan`, `.domain` y nombres sin punto son convención local, no RFC. No auditado: EDNS completo (6891), TCP/truncado (7766), DoH (8484), DNS64 (6147).
 
@@ -152,7 +153,7 @@ Notas:
 2. Descubrimiento de clientes que sobrevive a recargas; nombres desde la Redis de Firewalla.
 3. Memoria: GC 50%, límite 48 MiB, caché 4096 entradas.
 4. Respuestas locales, protección WPAD/ISATAP, sin MAC ni ECS privado hacia fuera.
-5. Cumplimiento de estándares de la sección 6.
+5. Cumplimiento de estándares de la sección 6 (v3.15–v3.17).
 
 La versión debe llevar siempre el sufijo `+patched-...` para que ctrld no se autoactualice.
 
@@ -170,8 +171,9 @@ La versión debe llevar siempre el sufijo `+patched-...` para que ctrld no se au
 | 11-05 20:39 | v3.16: TTL mínimo, DO/CD, raíz |
 | 11-06 09:21 | Google reemplazado por Quad9; AT&T añadido como 4º upstream |
 | 11-06 09:36 | NextDNS a anycast2 `45.90.30.0` (anexia-atl): mediana 32 → 8 ms |
+| 11-06 11:48 | v3.17: DNS-SD en zonas inversas privadas respondido localmente |
 
 ## 9. Pendientes
 
-- Observar la v3.16 unos días.
-- Publicar la rama `firewalla-v3.16-minmem` en GitHub (diff en `/data/controld/patches-v3.15-to-v3.16.diff`).
+- Observar la v3.17 unos días.
+- Publicar las ramas `firewalla-v3.16-minmem` y `firewalla-v3.17-minmem` en GitHub (diffs `/data/controld/patches-v3.15-to-v3.16.diff` y `patches-v3.16-to-v3.17.diff`).

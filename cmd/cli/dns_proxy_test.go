@@ -1104,6 +1104,87 @@ func Test_proxyPrivatePtrLookup_NXDOMAIN_SOA(t *testing.T) {
 	assert.Equal(t, uint32(60), soa.Minttl)
 }
 
+// Test_privateReverseNonAddressZone covers the DNS-SD browsing-domain queries
+// (RFC 6763 s11) and other non-address names inside private reverse zones, which
+// are answered locally (RFC 6303); address names, their ancestors and public
+// ranges must not match (RFC 8020).
+func Test_privateReverseNonAddressZone(t *testing.T) {
+	tests := []struct {
+		name     string
+		qname    string
+		wantZone string
+		match    bool
+	}{
+		{"dns-sd lb /24 192.168", "lb._dns-sd._udp.0.20.168.192.in-addr.arpa.", "in-addr.arpa.", true},
+		{"dns-sd b /24 upper case", "B._DNS-SD._UDP.0.20.168.192.IN-ADDR.ARPA.", "in-addr.arpa.", true},
+		{"dns-sd db /16 192.168", "db._dns-sd._udp.168.192.in-addr.arpa.", "in-addr.arpa.", true},
+		{"dns-sd r 10/8", "r._dns-sd._udp.10.in-addr.arpa.", "in-addr.arpa.", true},
+		{"dns-sd 172.16/16", "dr._dns-sd._udp.0.16.172.in-addr.arpa.", "in-addr.arpa.", true},
+		{"dns-sd 172.31/16", "lb._dns-sd._udp.31.172.in-addr.arpa.", "in-addr.arpa.", true},
+		{"dns-sd cgnat", "lb._dns-sd._udp.0.0.64.100.in-addr.arpa.", "in-addr.arpa.", true},
+		{"dns-sd link-local", "lb._dns-sd._udp.254.169.in-addr.arpa.", "in-addr.arpa.", true},
+		{"dns-sd loopback", "lb._dns-sd._udp.0.0.0.127.in-addr.arpa.", "in-addr.arpa.", true},
+		{"dns-sd ula ip6", "lb._dns-sd._udp.0.0.0.0.0.0.0.0.0.0.0.0.0.0.d.f.ip6.arpa.", "ip6.arpa.", true},
+		{"dns-sd link-local ip6", "lb._dns-sd._udp.0.0.0.0.0.0.0.0.0.0.0.0.0.8.e.f.ip6.arpa.", "ip6.arpa.", true},
+		{"bad octet label 300", "300.20.168.192.in-addr.arpa.", "in-addr.arpa.", true},
+
+		{"full private address", "5.20.168.192.in-addr.arpa.", "", false},
+		{"ancestor of private PTRs", "20.168.192.in-addr.arpa.", "", false},
+		{"private zone apex", "168.192.in-addr.arpa.", "", false},
+		{"dns-sd public /24", "lb._dns-sd._udp.0.113.0.203.in-addr.arpa.", "", false},
+		{"dns-sd 172/8 is not private", "lb._dns-sd._udp.172.in-addr.arpa.", "", false},
+		{"dns-sd 172.32/16 is public", "lb._dns-sd._udp.32.172.in-addr.arpa.", "", false},
+		{"dns-sd 192/8 is not private", "lb._dns-sd._udp.192.in-addr.arpa.", "", false},
+		{"dns-sd 100.128/16 outside cgnat", "lb._dns-sd._udp.128.100.in-addr.arpa.", "", false},
+		{"dns-sd public ip6", "lb._dns-sd._udp.8.b.d.0.1.0.0.2.ip6.arpa.", "", false},
+		{"dns-sd fc00::/7 needs 2 nibbles", "lb._dns-sd._udp.f.ip6.arpa.", "", false},
+		{"no address part", "lb._dns-sd._udp.in-addr.arpa.", "", false},
+		{"leading zero is not an octet", "x.010.in-addr.arpa.", "", false},
+		{"too many octets", "x.1.1.1.1.10.in-addr.arpa.", "", false},
+		{"not reverse", "lb._dns-sd._udp.lan.", "", false},
+		{"in-addr.arpa itself", "in-addr.arpa.", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := new(dns.Msg)
+			m.SetQuestion(tc.qname, dns.TypePTR)
+			zone, ok := privateReverseNonAddressZone(m)
+			assert.Equal(t, tc.match, ok)
+			assert.Equal(t, tc.wantZone, zone)
+		})
+	}
+}
+
+func Test_privateReverseNonAddressAnswer_NXDOMAIN_SOA(t *testing.T) {
+	p := &prog{cfg: &ctrld.Config{}}
+	m := new(dns.Msg)
+	m.SetQuestion("lb._dns-sd._udp.0.20.168.192.in-addr.arpa.", dns.TypePTR)
+	resp := p.privateReverseNonAddressAnswer(context.Background(), m)
+	require.NotNil(t, resp)
+	assert.Equal(t, dns.RcodeNameError, resp.Rcode)
+	assert.True(t, resp.Authoritative)
+	assert.Equal(t, m.Id, resp.Id)
+	require.Len(t, resp.Question, 1)
+	assert.Equal(t, m.Question[0].Name, resp.Question[0].Name)
+	require.Len(t, resp.Ns, 1)
+	soa, ok := resp.Ns[0].(*dns.SOA)
+	require.True(t, ok)
+	assert.Equal(t, "in-addr.arpa.", soa.Hdr.Name)
+	assert.Equal(t, uint32(60), soa.Minttl)
+
+	m6 := new(dns.Msg)
+	m6.SetQuestion("b._dns-sd._udp.0.0.0.0.d.f.ip6.arpa.", dns.TypePTR)
+	resp6 := p.privateReverseNonAddressAnswer(context.Background(), m6)
+	require.NotNil(t, resp6)
+	soa6, ok := resp6.Ns[0].(*dns.SOA)
+	require.True(t, ok)
+	assert.Equal(t, "ip6.arpa.", soa6.Hdr.Name)
+
+	pub := new(dns.Msg)
+	pub.SetQuestion("lb._dns-sd._udp.0.113.0.203.in-addr.arpa.", dns.TypePTR)
+	assert.Nil(t, p.privateReverseNonAddressAnswer(context.Background(), pub))
+}
+
 func Test_proxyLanHostnameQuery_ExistingHost_v310(t *testing.T) {
 	table := clientinfo.NewTable(&ctrld.Config{}, "", "", nil)
 	table.StoreDHCPForTest("192.168.20.87", "book2-pao")

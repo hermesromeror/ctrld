@@ -586,6 +586,18 @@ func (p *prog) proxyPrivatePtrLookup(ctx context.Context, msg *dns.Msg) *dns.Msg
 	return localNegativeAnswer(msg, dns.RcodeNameError, soaZone, "lan.")
 }
 
+// privateReverseNonAddressAnswer returns a local NXDOMAIN for a name inside a
+// private reverse zone that cannot be an address name (see
+// privateReverseNonAddressZone), or nil when the name is not one.
+func (p *prog) privateReverseNonAddressAnswer(ctx context.Context, msg *dns.Msg) *dns.Msg {
+	zone, ok := privateReverseNonAddressZone(msg)
+	if !ok {
+		return nil
+	}
+	ctrld.Log(ctx, mainLog.Load().Debug(), "non-address name %s in private reverse zone, returning local NXDOMAIN", msg.Question[0].Name)
+	return localNegativeAnswer(msg, dns.RcodeNameError, zone, "lan.")
+}
+
 // localNegativeAnswer builds an authoritative negative answer (NXDOMAIN, or
 // NODATA when rcode is RcodeSuccess) carrying a synthetic SOA for zone in the
 // authority section, so clients cache it per RFC 2308. The SOA MNAME/RNAME
@@ -827,6 +839,13 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			ctx = ctrld.LanQueryCtx(ctx)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "active directory domain lookup, skipping public DNS")
 		}
+		if req.ufr.matchedRule == noRuleMatched {
+			if answer := p.privateReverseNonAddressAnswer(ctx, req.msg); answer != nil {
+				res.answer = answer
+				res.clientInfo = true
+				return res
+			}
+		}
 		if req.ufr.matchedRule == noRuleMatched && p.ciTable != nil {
 			switch {
 			case isPrivatePtrLookup(req.msg):
@@ -852,6 +871,10 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			// not log the bypass. Named explicitly rather than falling into the
 			// "no explicit policy matched" default.
 			ctrld.Log(ctx, mainLog.Load().Debug(), "%s, %s -> %v", req.ufr.matchedPolicy, req.ufr.matchedRule, upstreams)
+		case isPrivateReverseNonAddress(req.msg):
+			res.answer = p.privateReverseNonAddressAnswer(ctx, req.msg)
+			res.clientInfo = true
+			return res
 		case isSrvLanLookup(req.msg):
 			upstreams = []string{upstreamOS}
 			upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
@@ -1967,6 +1990,122 @@ func isPrivatePtrLookup(m *dns.Msg) bool {
 		}
 	}
 	return false
+}
+
+// privateReversePrefixes are the address ranges whose reverse zones are answered
+// locally (RFC 6303, RFC 7793 for CGNAT, RFC 7335), the same set isPrivatePtrLookup
+// treats as private.
+var privateReversePrefixes = []netip.Prefix{
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	ipv4ServiceContinuityPrefix,
+	netip.MustParsePrefix("fc00::/7"),
+	netip.MustParsePrefix("fe80::/10"),
+	netip.MustParsePrefix("::1/128"),
+}
+
+// privateReverseNonAddressZone reports whether name lies inside the reverse zone
+// of a private range but cannot be an address name, because one of its labels
+// below the address part is not an address label (for example the DNS-SD
+// browsing-domain queries of RFC 6763 s11, "lb._dns-sd._udp.0.20.168.192.in-addr.arpa.").
+// Nothing can exist at such a name, so it is answered with a local NXDOMAIN
+// (RFC 6303) instead of being sent to the upstreams. It returns the zone for the
+// synthetic SOA ("in-addr.arpa." or "ip6.arpa.").
+//
+// Names made only of address labels (a full address, or an ancestor such as
+// "20.168.192.in-addr.arpa.") are never matched: a full address is handled by
+// isPrivatePtrLookup, and an ancestor holds the PTR records below it, so an
+// NXDOMAIN there would deny all of them (RFC 8020).
+func privateReverseNonAddressZone(m *dns.Msg) (string, bool) {
+	if m == nil || len(m.Question) == 0 {
+		return "", false
+	}
+	name := strings.ToLower(dns.Fqdn(m.Question[0].Name))
+	var (
+		zone   string
+		rest   string
+		isIPv6 bool
+	)
+	switch {
+	case strings.HasSuffix(name, ".in-addr.arpa."):
+		zone, rest = "in-addr.arpa.", strings.TrimSuffix(name, ".in-addr.arpa.")
+	case strings.HasSuffix(name, ".ip6.arpa."):
+		zone, rest, isIPv6 = "ip6.arpa.", strings.TrimSuffix(name, ".ip6.arpa."), true
+	default:
+		return "", false
+	}
+	labels := dns.SplitDomainName(rest + ".")
+	// Address labels are read from the zone cut outwards: the last label is the
+	// most significant octet (or nibble).
+	var addr []byte
+	n := 0
+	for i := len(labels) - 1; i >= 0; i-- {
+		v, ok := reverseAddressLabel(labels[i], isIPv6)
+		if !ok {
+			break
+		}
+		addr = append(addr, v)
+		n++
+	}
+	if n == 0 || n == len(labels) {
+		// No address part to place the name, or a pure address name.
+		return "", false
+	}
+	var prefix netip.Prefix
+	if isIPv6 {
+		if n > 32 {
+			return "", false
+		}
+		var b [16]byte
+		for i, v := range addr {
+			if i&1 == 0 {
+				b[i/2] = v << 4
+			} else {
+				b[i/2] |= v
+			}
+		}
+		prefix = netip.PrefixFrom(netip.AddrFrom16(b), n*4)
+	} else {
+		if n > 4 {
+			return "", false
+		}
+		var b [4]byte
+		copy(b[:], addr)
+		prefix = netip.PrefixFrom(netip.AddrFrom4(b), n*8)
+	}
+	for _, r := range privateReversePrefixes {
+		if prefix.Bits() >= r.Bits() && r.Contains(prefix.Addr()) {
+			return zone, true
+		}
+	}
+	return "", false
+}
+
+// reverseAddressLabel parses one label of a reverse name: a decimal octet
+// (0-255, no leading zeros) for in-addr.arpa, a single hex nibble for ip6.arpa.
+// isPrivateReverseNonAddress reports whether privateReverseNonAddressZone matches m.
+func isPrivateReverseNonAddress(m *dns.Msg) bool {
+	_, ok := privateReverseNonAddressZone(m)
+	return ok
+}
+
+func reverseAddressLabel(label string, isIPv6 bool) (byte, bool) {
+	if isIPv6 {
+		if len(label) != 1 {
+			return 0, false
+		}
+		v, err := strconv.ParseUint(label, 16, 8)
+		return byte(v), err == nil
+	}
+	if label == "" || len(label) > 3 || (len(label) > 1 && label[0] == '0') {
+		return 0, false
+	}
+	v, err := strconv.ParseUint(label, 10, 8)
+	return byte(v), err == nil
 }
 
 func (p *prog) isLanHostnameQuery(m *dns.Msg) bool {
