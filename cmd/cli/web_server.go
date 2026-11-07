@@ -311,12 +311,79 @@ func (ws *webServer) registerRoutes() {
 			answers = append(answers, ans.String())
 		}
 
+		edeCode := -1
+		edeText := ""
+		blocked := false
+		blockReason := ""
+
+		for _, opt := range in.Extra {
+			if edns0, ok := opt.(*dns.OPT); ok {
+				for _, o := range edns0.Option {
+					if ede, ok := o.(*dns.EDNS0_EDE); ok {
+						edeCode = int(ede.InfoCode)
+						edeText = ede.ExtraText
+						// RFC 8914: 15=Blocked, 16=Censored, 17=Filtered, 18=Prohibited
+						if ede.InfoCode >= 15 && ede.InfoCode <= 18 {
+							blocked = true
+							desc := "Filtered"
+							switch ede.InfoCode {
+							case 15:
+								desc = "Blocked"
+							case 16:
+								desc = "Censored"
+							case 17:
+								desc = "Filtered"
+							case 18:
+								desc = "Prohibited"
+							}
+							if ede.ExtraText != "" {
+								blockReason = fmt.Sprintf("EDE %d (%s): %s", ede.InfoCode, desc, ede.ExtraText)
+							} else {
+								blockReason = fmt.Sprintf("EDE %d (%s)", ede.InfoCode, desc)
+							}
+						} else if strings.Contains(strings.ToLower(ede.ExtraText), "blocked") {
+							blocked = true
+							blockReason = ede.ExtraText
+						}
+					}
+				}
+			}
+		}
+
+		// Also check answers for 0.0.0.0 or ::
+		for _, ans := range in.Answer {
+			if a, ok := ans.(*dns.A); ok && (a.A.IsUnspecified() || a.A.IsLoopback()) {
+				blocked = true
+				if blockReason == "" {
+					blockReason = "Respuesta 0.0.0.0 (IP de bloqueo)"
+				}
+			}
+			if aaaa, ok := ans.(*dns.AAAA); ok && (aaaa.AAAA.IsUnspecified() || aaaa.AAAA.IsLoopback()) {
+				blocked = true
+				if blockReason == "" {
+					blockReason = "Respuesta :: (IP de bloqueo)"
+				}
+			}
+		}
+
+		// If NODATA (NOERROR with 0 answers) and has EDE filtered, it's blocked
+		if len(in.Answer) == 0 && (edeCode == 17 || edeCode == 15 || strings.Contains(strings.ToLower(edeText), "blocked")) {
+			blocked = true
+			if blockReason == "" {
+				blockReason = "Filtrado por NextDNS (NODATA)"
+			}
+		}
+
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"name":       name,
-			"type":       dns.TypeToString[qtype],
-			"rcode":      dns.RcodeToString[in.Rcode],
-			"latency_ms": rttMs,
-			"answers":    answers,
+			"name":         name,
+			"type":         dns.TypeToString[qtype],
+			"rcode":        dns.RcodeToString[in.Rcode],
+			"latency_ms":   rttMs,
+			"answers":      answers,
+			"blocked":      blocked,
+			"block_reason": blockReason,
+			"ede_code":     edeCode,
+			"ede_text":     edeText,
 		})
 	})
 

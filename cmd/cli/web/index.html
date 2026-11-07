@@ -827,30 +827,48 @@
     try {
       const res = await fetch(`/api/test-dns?name=${encodeURIComponent(domain)}&type=${qtype}`);
       const data = await res.json();
-      
-      let isBlocked = false;
-      if (data.rcode === 'NXDOMAIN' || (data.answers && data.answers.some(a => a.includes('0.0.0.0')))) {
-        isBlocked = true;
+
+      let banner = '';
+      let detailsHtml = '';
+
+      if (data.blocked) {
+        // CASO 1: Bloqueado por regla de NextDNS / Adblock / Categoría
+        banner = `<div style="color:var(--rose); font-weight:700; font-size:13px; margin-bottom:6px;">✖ ESTADO: BLOQUEADO POR NEXTDNS</div>`;
+        detailsHtml += `<div>Dominio: <strong>${data.name}</strong> (${data.type})</div>`;
+        if (data.block_reason) {
+          detailsHtml += `<div style="color:#fca5a5; margin-top:3px;">Motivo del Bloqueo: <strong>${data.block_reason}</strong></div>`;
+        }
+        if (data.answers && data.answers.length > 0) {
+          detailsHtml += `<div style="color:var(--muted-foreground); margin-top:3px;">Respuesta devuelta: ${data.answers.join(', ')}</div>`;
+        } else {
+          detailsHtml += `<div style="color:var(--muted-foreground); margin-top:3px;">Respuesta: NODATA (0 registros devueltos por la política de filtrado)</div>`;
+        }
+      } else if (data.rcode === 'NOERROR' && data.answers && data.answers.length > 0) {
+        // CASO 2: Permitido y resuelto
+        banner = `<div style="color:var(--emerald); font-weight:700; font-size:13px; margin-bottom:6px;">✔ ESTADO: NOERROR (PERMITIDO Y RESUELTO)</div>`;
+        detailsHtml += `<div>Dominio: <strong>${data.name}</strong> (${data.type})</div>`;
+        detailsHtml += `<div style="color:var(--foreground); margin-top:3px;">Respuestas:<br>&nbsp;&nbsp;${data.answers.join('<br>&nbsp;&nbsp;')}</div>`;
+      } else if (data.rcode === 'NXDOMAIN') {
+        // CASO 3: NXDOMAIN (el dominio no existe)
+        banner = `<div style="color:var(--amber); font-weight:700; font-size:13px; margin-bottom:6px;">ℹ ESTADO: NXDOMAIN (EL DOMINIO NO EXISTE)</div>`;
+        detailsHtml += `<div>Dominio: <strong>${data.name}</strong> (${data.type})</div>`;
+        detailsHtml += `<div style="color:var(--muted-foreground); margin-top:3px;">El dominio consultado no está registrado o no existe en los servidores DNS raíz.</div>`;
+      } else if (data.rcode === 'NOERROR' && (!data.answers || data.answers.length === 0)) {
+        // CASO 4: NODATA sin bloqueo (existe pero no tiene ese registro específico)
+        banner = `<div style="color:#60a5fa; font-weight:700; font-size:13px; margin-bottom:6px;">ℹ ESTADO: NOERROR / NODATA (SIN REGISTRO ${data.type})</div>`;
+        detailsHtml += `<div>Dominio: <strong>${data.name}</strong> (${data.type})</div>`;
+        detailsHtml += `<div style="color:var(--muted-foreground); margin-top:3px;">El dominio existe, pero no tiene registros configurados para el tipo ${data.type}.</div>`;
+      } else {
+        // CASO 5: Otro RCODE (SERVFAIL, REFUSED, etc.)
+        banner = `<div style="color:var(--amber); font-weight:700; font-size:13px; margin-bottom:6px;">⚠ ESTADO: ${data.rcode}</div>`;
+        detailsHtml += `<div>Dominio: <strong>${data.name}</strong> (${data.type})</div>`;
       }
 
-      let banner = `<div style="color:var(--emerald); font-weight:700; margin-bottom:4px;">✔ ESTADO: ${data.rcode} (PERMITIDO)</div>`;
-      if (isBlocked) {
-        banner = `<div style="color:var(--rose); font-weight:700; margin-bottom:4px;">✖ ESTADO: BLOQUEADO POR NEXTDNS (${data.rcode})</div>`;
-      }
+      detailsHtml += `<div style="color:var(--muted-foreground); font-size:11px; margin-top:6px; border-top:1px solid rgba(255,255,255,0.06); padding-top:6px;">Servidor: 192.168.1.1:5354 (ctrld v3.18) • RTT: ${data.latency_ms} ms • RCODE: ${data.rcode}</div>`;
 
-      let ansHtml = '<div style="color:var(--muted-foreground);">Respuestas: (ninguna / NODATA / NXDOMAIN)</div>';
-      if (data.answers && data.answers.length > 0) {
-        ansHtml = `<div style="color:var(--foreground);">Respuestas:<br>&nbsp;&nbsp;${data.answers.join('<br>&nbsp;&nbsp;')}</div>`;
-      }
-
-      box.innerHTML = `
-        ${banner}
-        <div>Dominio: <strong>${data.name}</strong> (${data.type})</div>
-        ${ansHtml}
-        <div style="color:var(--muted-foreground); margin-top:4px;">Servidor: 192.168.1.1:5354 (ctrld v3.18) • Latencia: ${data.latency_ms} ms</div>
-      `;
+      box.innerHTML = banner + detailsHtml;
     } catch(e) {
-      box.innerHTML = `<div style="color:var(--rose);">Error al consultar: ${e.message}</div>`;
+      box.innerHTML = `<div style="color:var(--rose); font-weight:700;">Error al consultar: ${e.message}</div>`;
     }
   }
 
