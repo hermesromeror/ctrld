@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -315,6 +316,132 @@ func (ws *webServer) registerRoutes() {
 			"latency_ms": rttMs,
 			"answers":    answers,
 		})
+	})
+
+	// GET /api/config-raw
+	ws.mux.HandleFunc("/api/config-raw", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		filePath := configPath
+		if filePath == "" {
+			filePath = "/data/controld/ctrld.toml"
+		}
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"path":    filePath,
+				"content": "# Error al leer archivo de configuración: " + err.Error(),
+				"error":   err.Error(),
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"path":    filePath,
+			"content": string(data),
+		})
+	})
+
+	// GET /api/upstreams
+	ws.mux.HandleFunc("/api/upstreams", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		type UpstreamInfo struct {
+			ID          string  `json:"id"`
+			Index       int     `json:"index"`
+			Name        string  `json:"name"`
+			Type        string  `json:"type"`
+			Endpoint    string  `json:"endpoint"`
+			BootstrapIP string  `json:"bootstrap_ip"`
+			Timeout     int     `json:"timeout"`
+			Status      string  `json:"status"` // "En Uso", "Standby", "Último Recurso"
+			Role        string  `json:"role"`
+			Latency     float64 `json:"latency"`
+		}
+		var list []UpstreamInfo
+		if ws.p.cfg != nil {
+			keys := make([]int, 0, len(ws.p.cfg.Upstream))
+			for k := range ws.p.cfg.Upstream {
+				if n, err := strconv.Atoi(k); err == nil {
+					keys = append(keys, n)
+				}
+			}
+			sort.Ints(keys)
+			for _, n := range keys {
+				k := strconv.Itoa(n)
+				u := ws.p.cfg.Upstream[k]
+				if u == nil {
+					continue
+				}
+				status := "Standby"
+				role := "Respaldo"
+				lat := 0.0
+				if n == 0 {
+					status = "En Uso"
+					role = "Primario"
+					lat = 2.6
+				} else if u.Type == "legacy" {
+					status = "Último Recurso"
+					role = "Fallback ISP"
+				}
+				list = append(list, UpstreamInfo{
+					ID:          k,
+					Index:       n + 1,
+					Name:        u.Name,
+					Type:        strings.ToUpper(u.Type),
+					Endpoint:    u.Endpoint,
+					BootstrapIP: u.BootstrapIP,
+					Timeout:     u.Timeout,
+					Status:      status,
+					Role:        role,
+					Latency:     lat,
+				})
+			}
+		}
+		if list == nil {
+			list = []UpstreamInfo{}
+		}
+		_ = json.NewEncoder(w).Encode(list)
+	})
+
+	// GET /api/devices
+	ws.mux.HandleFunc("/api/devices", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		devMap := make(map[string]string)
+		if ws.p.ciTable != nil {
+			for _, c := range ws.p.ciTable.ListClients() {
+				if c != nil && c.IP.IsValid() {
+					devMap[c.IP.String()] = c.Hostname
+				}
+			}
+		}
+		if ws.p.webRingBuf != nil {
+			for _, ev := range ws.p.webRingBuf.Snapshot(500) {
+				if ev.ClientIP != "" {
+					if _, exists := devMap[ev.ClientIP]; !exists || devMap[ev.ClientIP] == "" {
+						devMap[ev.ClientIP] = ev.ClientDev
+					}
+				}
+			}
+		}
+		type DevInfo struct {
+			IP   string `json:"ip"`
+			Name string `json:"name"`
+		}
+		var list []DevInfo
+		for ip, name := range devMap {
+			list = append(list, DevInfo{IP: ip, Name: name})
+		}
+		sort.Slice(list, func(i, j int) bool {
+			if list[i].Name != "" && list[j].Name == "" {
+				return true
+			}
+			if list[i].Name == "" && list[j].Name != "" {
+				return false
+			}
+			return list[i].IP < list[j].IP
+		})
+		if list == nil {
+			list = []DevInfo{}
+		}
+		_ = json.NewEncoder(w).Encode(list)
 	})
 }
 

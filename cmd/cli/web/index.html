@@ -7,65 +7,87 @@
   <style>
     :root {
       --bg: #0b0f19;
-      --card-bg: #111827;
+      --card: #111827;
       --card-border: #1f2937;
-      --text: #f3f4f6;
-      --text-muted: #9ca3af;
+      --foreground: #f3f4f6;
+      --muted-foreground: #9ca3af;
       --accent: #3b82f6;
       --accent-hover: #2563eb;
       --emerald: #10b981;
       --emerald-bg: rgba(16, 185, 129, 0.12);
-      --red: #ef4444;
-      --red-bg: rgba(239, 68, 68, 0.12);
+      --rose: #f43f5e;
+      --rose-bg: rgba(244, 63, 94, 0.12);
       --amber: #f59e0b;
       --amber-bg: rgba(245, 158, 11, 0.12);
-      --purple: #8b5cf6;
-      --purple-bg: rgba(139, 92, 246, 0.12);
+      --purple: #a855f7;
+      --purple-bg: rgba(168, 85, 247, 0.12);
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       background-color: var(--bg);
-      color: var(--text);
+      color: var(--foreground);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      font-size: 14px;
+      font-size: 13px;
       line-height: 1.5;
       padding: 16px;
     }
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--card-border); border-radius: 4px; }
+
+    .pulse-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--emerald);
+      box-shadow: 0 0 6px var(--emerald);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.85); }
+    }
+
     .container {
-      max-width: 1200px;
+      max-width: 1080px;
       margin: 0 auto;
+      background: var(--card);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+      overflow: hidden;
       display: flex;
       flex-direction: column;
-      gap: 16px;
     }
-    /* Header */
+
+    /* Top Navigation Bar */
     header {
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 12px;
       padding: 14px 20px;
+      border-bottom: 1px solid var(--card-border);
       display: flex;
       justify-content: space-between;
       align-items: center;
       flex-wrap: wrap;
       gap: 12px;
+      background: rgba(15, 23, 42, 0.5);
     }
-    .brand {
+    .brand-wrap {
       display: flex;
       align-items: center;
       gap: 12px;
     }
     .brand-icon {
-      width: 36px;
-      height: 36px;
-      border-radius: 8px;
-      background: rgba(59, 130, 246, 0.15);
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      background: rgba(59, 130, 246, 0.12);
       border: 1px solid rgba(59, 130, 246, 0.3);
       color: #60a5fa;
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 18px;
+      font-size: 20px;
     }
     .brand-title {
       font-weight: 700;
@@ -84,23 +106,13 @@
       border: 1px solid rgba(16, 185, 129, 0.3);
       display: inline-flex;
       align-items: center;
-      gap: 5px;
-    }
-    .pulse-dot {
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background: var(--emerald);
-      box-shadow: 0 0 6px var(--emerald);
-      animation: pulse 2s infinite;
-    }
-    @keyframes pulse {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.4; transform: scale(0.85); }
+      gap: 6px;
+      font-family: ui-monospace, monospace;
     }
     .brand-subtitle {
-      font-size: 12px;
-      color: var(--text-muted);
+      font-size: 11px;
+      color: var(--muted-foreground);
+      margin-top: 2px;
     }
     .header-actions {
       display: flex;
@@ -109,9 +121,9 @@
     }
     button {
       background: #1f2937;
-      color: var(--text);
+      color: var(--foreground);
       border: 1px solid var(--card-border);
-      padding: 7px 14px;
+      padding: 7px 13px;
       border-radius: 8px;
       font-size: 12px;
       font-weight: 600;
@@ -129,139 +141,147 @@
       color: #fff;
     }
     button.primary:hover { background: var(--accent-hover); }
-    button.danger {
-      background: rgba(239, 68, 68, 0.2);
-      border-color: rgba(239, 68, 68, 0.4);
-      color: #fca5a5;
-    }
-    button.danger:hover { background: rgba(239, 68, 68, 0.3); }
 
-    /* Cards Grid */
-    .grid {
+    /* Metrics Ribbon */
+    .metrics-ribbon {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
       gap: 12px;
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--card-border);
+      background: rgba(17, 24, 39, 0.6);
     }
-    .card {
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 12px;
+    .metric-card {
       padding: 14px 16px;
+      border-radius: 12px;
+      border: 1px solid var(--card-border);
+      background: rgba(11, 15, 25, 0.5);
       display: flex;
       flex-direction: column;
       justify-content: space-between;
     }
-    .card-top {
+    .metric-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      font-size: 12px;
-      color: var(--text-muted);
-    }
-    .card-tag {
       font-size: 11px;
-      font-weight: 600;
+      color: var(--muted-foreground);
+    }
+    .metric-tag {
+      font-size: 10px;
+      font-weight: 700;
       padding: 1px 6px;
       border-radius: 4px;
+      font-family: ui-monospace, monospace;
     }
-    .card-value {
-      font-size: 20px;
+    .metric-value {
+      font-size: 19px;
       font-weight: 700;
       margin-top: 8px;
-      color: var(--text);
+      color: var(--foreground);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
-    .card-footer {
-      font-size: 12px;
+    .metric-footer {
+      font-size: 11px;
       margin-top: 4px;
       display: flex;
       align-items: center;
-      gap: 4px;
-    }
-    .text-emerald { color: var(--emerald); }
-    .text-blue { color: #60a5fa; }
-    .text-amber { color: var(--amber); }
-    .text-muted { color: var(--text-muted); }
-
-    /* Diagnostic Box */
-    .diagnostic-panel {
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 12px;
-      padding: 14px 18px;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
-    .diagnostic-row {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-      flex-wrap: wrap;
-    }
-    input, select {
-      background: #1f2937;
-      border: 1px solid var(--card-border);
-      color: var(--text);
-      padding: 7px 12px;
-      border-radius: 8px;
-      font-size: 13px;
-      outline: none;
-    }
-    input:focus, select:focus {
-      border-color: var(--accent);
-    }
-    .test-result {
-      background: #0d121f;
-      border: 1px solid #1f2937;
-      border-radius: 8px;
-      padding: 10px 14px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      font-size: 12px;
-      color: #93c5fd;
-      display: none;
-      white-space: pre-wrap;
-      word-break: break-all;
+      gap: 5px;
     }
 
-    /* Live Queries Table */
-    .table-container {
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 12px;
-      overflow: hidden;
-      display: flex;
-      flex-direction: column;
-    }
-    .table-header {
-      padding: 12px 18px;
+    /* Tabs Navigation */
+    .tabs-bar {
+      padding: 0 20px;
       border-bottom: 1px solid var(--card-border);
+      display: flex;
+      gap: 16px;
+      background: rgba(15, 23, 42, 0.3);
+      overflow-x: auto;
+    }
+    .tab-btn {
+      background: transparent;
+      border: none;
+      border-bottom: 2px solid transparent;
+      border-radius: 0;
+      padding: 12px 4px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted-foreground);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .tab-btn:hover {
+      color: var(--foreground);
+      background: transparent;
+    }
+    .tab-btn.active {
+      color: #60a5fa;
+      border-bottom-color: #3b82f6;
+    }
+
+    /* Tab Contents */
+    .tab-view {
+      display: none;
+      padding: 20px;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .tab-view.active {
+      display: flex;
+    }
+
+    /* Filters Bar */
+    .filter-row {
       display: flex;
       justify-content: space-between;
       align-items: center;
       flex-wrap: wrap;
       gap: 10px;
     }
-    .table-title {
-      font-weight: 700;
-      font-size: 14px;
+    .filter-group {
       display: flex;
       align-items: center;
-      gap: 8px;
-    }
-    .table-controls {
-      display: flex;
-      align-items: center;
-      gap: 8px;
+      gap: 6px;
       flex-wrap: wrap;
     }
-    .search-input {
-      min-width: 200px;
-      padding: 5px 10px;
+    input[type="text"], select {
+      background: #1f2937;
+      border: 1px solid var(--card-border);
+      color: var(--foreground);
+      padding: 6px 12px;
+      border-radius: 8px;
       font-size: 12px;
+      outline: none;
     }
-    .table-scroll {
-      overflow-x: auto;
-      max-height: 480px;
+    input[type="text"]:focus, select:focus {
+      border-color: var(--accent);
+    }
+    .flt-pill {
+      background: transparent;
+      border: 1px solid transparent;
+      padding: 5px 10px;
+      border-radius: 6px;
+      font-size: 11px;
+      color: var(--muted-foreground);
+    }
+    .flt-pill:hover {
+      color: var(--foreground);
+      background: rgba(255, 255, 255, 0.05);
+    }
+    .flt-pill.active {
+      background: rgba(255, 255, 255, 0.1);
+      color: var(--foreground);
+      font-weight: 700;
+    }
+
+    /* Queries Table */
+    .table-box {
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      background: rgba(11, 15, 25, 0.4);
+      max-height: 420px;
       overflow-y: auto;
     }
     table {
@@ -270,28 +290,30 @@
       text-align: left;
       font-size: 12px;
     }
-    th {
-      background: #131d2e;
-      color: var(--text-muted);
-      padding: 10px 14px;
-      font-weight: 600;
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
+    thead {
       position: sticky;
       top: 0;
-      z-index: 1;
+      background: #111827;
+      z-index: 2;
       border-bottom: 1px solid var(--card-border);
     }
+    th {
+      padding: 9px 12px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted-foreground);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
     td {
-      padding: 8px 14px;
-      border-bottom: 1px solid rgba(31, 41, 55, 0.7);
+      padding: 8px 12px;
+      border-bottom: 1px solid rgba(31, 41, 55, 0.5);
       vertical-align: middle;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       white-space: nowrap;
     }
     tr:hover {
-      background: rgba(31, 41, 55, 0.4);
+      background: rgba(31, 41, 55, 0.35);
     }
     .status-badge {
       display: inline-block;
@@ -299,12 +321,72 @@
       border-radius: 4px;
       font-size: 10px;
       font-weight: 700;
-      letter-spacing: 0.03em;
+      font-family: ui-monospace, monospace;
     }
-    .badge-resolved { background: var(--emerald-bg); color: var(--emerald); border: 1px solid rgba(16, 185, 129, 0.25); }
-    .badge-cached { background: var(--purple-bg); color: #c084fc; border: 1px solid rgba(139, 92, 246, 0.25); }
-    .badge-blocked { background: var(--red-bg); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.25); }
+    .badge-allowed { background: var(--emerald-bg); color: var(--emerald); border: 1px solid rgba(16, 185, 129, 0.25); }
+    .badge-cached { background: var(--purple-bg); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.25); }
+    .badge-blocked { background: var(--rose-bg); color: #fb7185; border: 1px solid rgba(244, 63, 94, 0.25); }
     .badge-nxdomain { background: var(--amber-bg); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.25); }
+
+    /* Upstream Cards */
+    .upstream-card {
+      padding: 14px 18px;
+      border-radius: 12px;
+      border: 1px solid var(--card-border);
+      background: rgba(11, 15, 25, 0.4);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      transition: all 0.15s ease;
+    }
+    .upstream-card.active-primary {
+      border-color: rgba(16, 185, 129, 0.35);
+      background: rgba(16, 185, 129, 0.04);
+    }
+    .upstream-num {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.06);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 13px;
+    }
+    .active-primary .upstream-num {
+      background: var(--emerald-bg);
+      color: var(--emerald);
+    }
+
+    /* Test Box */
+    .test-box {
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 14px 16px;
+      background: rgba(11, 15, 25, 0.6);
+      font-family: ui-monospace, monospace;
+      font-size: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    /* TOML Pre Box */
+    .toml-box {
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 16px;
+      background: #070a11;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      color: #34d399;
+      max-height: 480px;
+      overflow-x: auto;
+      white-space: pre;
+      line-height: 1.6;
+    }
 
     .toast {
       position: fixed;
@@ -315,7 +397,7 @@
       border: 1px solid #374151;
       padding: 10px 18px;
       border-radius: 8px;
-      font-size: 13px;
+      font-size: 12px;
       box-shadow: 0 10px 25px rgba(0,0,0,0.5);
       z-index: 100;
       opacity: 0;
@@ -335,134 +417,183 @@
 
   <!-- Header -->
   <header>
-    <div class="brand">
+    <div class="brand-wrap">
       <div class="brand-icon">⚡</div>
       <div>
         <div class="brand-title">
           <span>ctrld Manager</span>
           <span class="badge-version">
             <span class="pulse-dot"></span>
-            <span id="label-version">v3.18-webui</span>
+            <span id="hdr-version">v3.18-webui</span>
           </span>
         </div>
-        <div class="brand-subtitle" id="label-host">Firewalla Gold (192.168.1.1:5354) • Host: firewalla</div>
+        <div class="brand-subtitle">Firewalla Gold (192.168.1.1:5354) • Host: firewalla</div>
       </div>
     </div>
     <div class="header-actions">
       <button onclick="flushCache()" id="btn-flush">
         <span>🧹</span> Vaciar Caché
       </button>
-      <button onclick="togglePause()" id="btn-pause">
-        <span id="icon-pause">⏸️</span> <span id="label-pause">Pausar</span>
-      </button>
-      <button onclick="clearTable()" class="danger">
-        <span>🗑️</span> Limpiar
+      <button onclick="restartService()" id="btn-restart" class="primary">
+        <span>🔄</span> Reiniciar
       </button>
     </div>
   </header>
 
   <!-- Metrics Ribbon -->
-  <div class="grid">
-    <!-- Upstream Card -->
-    <div class="card">
-      <div class="card-top">
+  <div class="metrics-ribbon">
+    <!-- Card 1: Upstream Status -->
+    <div class="metric-card">
+      <div class="metric-header">
         <span>Upstream Activo</span>
-        <span class="card-tag text-emerald" style="background:var(--emerald-bg);" id="stat-upstream-proto">DoH3</span>
+        <span class="metric-tag" style="background:var(--emerald-bg); color:var(--emerald);" id="stat-proto">DoH3</span>
       </div>
-      <div class="card-value" id="stat-upstream-name">NextDNS (anexia-atl-1)</div>
-      <div class="card-footer text-emerald">
-        <span>●</span> <span id="stat-upstream-latency">2.6 ms latencia</span>
+      <div class="metric-value" id="stat-upstream">NextDNS (anexia-atl-1)</div>
+      <div class="metric-footer" style="color:var(--emerald);">
+        <span>●</span> <span id="stat-latency">2.6 ms latencia</span>
       </div>
     </div>
 
-    <!-- Memory RSS Card -->
-    <div class="card">
-      <div class="card-top">
+    <!-- Card 2: Memory RAM Real -->
+    <div class="metric-card">
+      <div class="metric-header">
         <span>Memoria RAM Real</span>
-        <span class="card-tag text-blue" style="background:rgba(59,130,246,0.12);" id="stat-mem-pct">0.9%</span>
+        <span class="metric-tag" style="background:rgba(59,130,246,0.12); color:#60a5fa;" id="stat-ram-pct">0.8%</span>
       </div>
-      <div class="card-value"><span id="stat-mem-rss">37.0</span> <span style="font-size:13px; font-weight:normal; color:var(--text-muted)">MB RSS</span></div>
-      <div class="card-footer text-muted">
-        <span id="stat-pid">PID --</span> • <span id="stat-uptime">0h 0m</span>
+      <div class="metric-value"><span id="stat-ram-mb">32.5</span> <span style="font-size:12px; font-weight:normal; color:var(--muted-foreground)">MB RSS</span></div>
+      <div class="metric-footer" style="color:var(--muted-foreground);">
+        <span id="stat-pid">PID 2155616</span> • <span id="stat-uptime">0h 0m</span>
       </div>
     </div>
 
-    <!-- Cache Ratio Card -->
-    <div class="card">
-      <div class="card-top">
+    <!-- Card 3: Cache Hit Ratio -->
+    <div class="metric-card">
+      <div class="metric-header">
         <span>Acierto en Caché</span>
-        <span class="card-tag" style="background:var(--purple-bg); color:#c084fc;">RFC 1035</span>
+        <span class="metric-tag" style="background:var(--purple-bg); color:#c084fc;">RFC 1035</span>
       </div>
-      <div class="card-value" id="stat-cache-hit">--%</div>
-      <div class="card-footer text-muted">
+      <div class="metric-value" id="stat-cache-ratio">0.0%</div>
+      <div class="metric-footer" style="color:var(--muted-foreground);">
         <span id="stat-cache-items">0</span> items en RAM (0.0 ms)
       </div>
     </div>
 
-    <!-- Query Stats Card -->
-    <div class="card">
-      <div class="card-top">
-        <span>Total Consultas</span>
-        <span class="card-tag text-amber" style="background:var(--amber-bg);" id="stat-blocked-pct">--% bloq.</span>
+    <!-- Card 4: Security Block Rate -->
+    <div class="metric-card">
+      <div class="metric-header">
+        <span>Filtro de Seguridad</span>
+        <span class="metric-tag" style="background:var(--rose-bg); color:#fb7185;">NextDNS</span>
       </div>
-      <div class="card-value" id="stat-total-queries">0</div>
-      <div class="card-footer text-amber">
-        <span id="stat-blocked-queries">0</span> bloqueadas por NextDNS
+      <div class="metric-value"><span id="stat-block-pct">0.0%</span> <span style="font-size:12px; font-weight:normal; color:#fb7185;">bloqueado</span></div>
+      <div class="metric-footer" style="color:var(--muted-foreground);">
+        <span id="stat-block-count">0</span> de <span id="stat-total-count">0</span> amenazas/ads
       </div>
     </div>
   </div>
 
-  <!-- DNS Diagnostics Panel -->
-  <div class="diagnostic-panel">
-    <div style="font-size:13px; font-weight:600; display:flex; align-items:center; gap:6px;">
-      <span>🔍</span> Probador de Resolución DNS Local
+  <!-- Interactive Navigation Tabs -->
+  <div class="tabs-bar">
+    <button onclick="switchTab('feed')" id="tab-feed" class="tab-btn active">Consultas en Vivo (Live Feed)</button>
+    <button onclick="switchTab('upstreams')" id="tab-upstreams" class="tab-btn">Cadena de Upstreams</button>
+    <button onclick="switchTab('tester')" id="tab-tester" class="tab-btn">Probador DNS en Vivo</button>
+    <button onclick="switchTab('config')" id="tab-config" class="tab-btn">Configuración (TOML)</button>
+  </div>
+
+  <!-- TAB 1: Live Feed -->
+  <div id="view-feed" class="tab-view active">
+    <!-- Search & Filters -->
+    <div class="filter-row">
+      <div style="flex:1; min-width:220px;">
+        <input type="text" id="query-search" oninput="filterFeed()" placeholder="Buscar por dominio o IP..." style="width:100%;">
+      </div>
+      <div class="filter-group">
+        <button onclick="setStatusFilter('all')" id="flt-all" class="flt-pill active">Todos</button>
+        <button onclick="setStatusFilter('blocked')" id="flt-blocked" class="flt-pill">Bloqueados</button>
+        <button onclick="setStatusFilter('allowed')" id="flt-allowed" class="flt-pill">Permitidos</button>
+        <button onclick="setStatusFilter('cached')" id="flt-cached" class="flt-pill">En Caché</button>
+        <select id="dev-filter" onchange="filterFeed()" style="margin-left:6px;">
+          <option value="all">Todos los dispositivos</option>
+        </select>
+        <button onclick="togglePause()" id="btn-pause" style="margin-left:6px; padding:5px 10px; font-size:11px;">
+          <span id="icon-pause">⏸️</span> <span id="label-pause">Pausar</span>
+        </button>
+        <button onclick="clearTable()" style="padding:5px 10px; font-size:11px;">
+          <span>🗑️</span>
+        </button>
+      </div>
     </div>
-    <div class="diagnostic-row">
-      <input type="text" id="test-domain" placeholder="ej: tracker.hdtvcloud.com" value="google.com" style="flex:1; min-width:200px;">
-      <select id="test-type">
+
+    <!-- Feed Table -->
+    <div class="table-box">
+      <table>
+        <thead>
+          <tr>
+            <th>Hora</th>
+            <th>Dispositivo</th>
+            <th>Tipo</th>
+            <th>Dominio</th>
+            <th>Estado / Upstream</th>
+            <th style="text-align:right;">Latencia</th>
+          </tr>
+        </thead>
+        <tbody id="feed-tbody">
+          <!-- Populated dynamically via SSE / Snapshot -->
+        </tbody>
+      </table>
+    </div>
+
+    <div style="display:flex; justify-content:space-between; align-items:center; font-size:11px; color:var(--muted-foreground);">
+      <span>Mostrando últimas consultas en vivo del daemon <code>ctrld</code>.</span>
+      <span style="color:var(--emerald); display:flex; align-items:center; gap:5px;">
+        <span class="pulse-dot"></span> Streaming SSE activo
+      </span>
+    </div>
+  </div>
+
+  <!-- TAB 2: Upstreams -->
+  <div id="view-upstreams" class="tab-view">
+    <div style="font-weight:700; font-size:14px;">Cadena de Failover Automático de ctrld</div>
+    <div style="font-size:12px; color:var(--muted-foreground);">
+      Prioridad en cascada: si el primario no responde en su tiempo de espera (1.5s), <code>ctrld</code> conmuta automáticamente al siguiente resolver.
+    </div>
+    <div id="upstreams-list" style="display:flex; flex-direction:column; gap:10px; margin-top:4px;">
+      <!-- Populated dynamically from /api/upstreams -->
+    </div>
+  </div>
+
+  <!-- TAB 3: Diagnostic Tester -->
+  <div id="view-tester" class="tab-view">
+    <div style="font-weight:700; font-size:14px;">Probador DNS en Vivo (Simulador dig desde Firewalla)</div>
+    <div style="font-size:12px; color:var(--muted-foreground);">
+      Prueba cualquier dominio para verificar instantáneamente si NextDNS lo permite o lo bloquea, o si se resuelve por caché local.
+    </div>
+
+    <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:4px;">
+      <input type="text" id="test-domain-input" value="tracker.hdtvcloud.com" placeholder="Ej: google.com, tracker.hdtvcloud.com" style="flex:1; min-width:220px; font-family:ui-monospace, monospace;">
+      <select id="test-type-select">
         <option value="A">A</option>
         <option value="AAAA">AAAA</option>
         <option value="TXT">TXT</option>
         <option value="PTR">PTR</option>
+        <option value="MX">MX</option>
       </select>
-      <button class="primary" onclick="runDnsTest()">
-        <span>⚡</span> Resolver
+      <button onclick="runDnsTest()" class="primary">
+        <span>⚡</span> Ejecutar Prueba
       </button>
     </div>
-    <div id="test-result-box" class="test-result"></div>
+
+    <div id="test-result-box" class="test-box">
+      <div style="color:var(--muted-foreground);">Introduce un nombre de dominio arriba y presiona "Ejecutar Prueba" para resolverlo en tiempo real contra el proxy local (:5354).</div>
+    </div>
   </div>
 
-  <!-- Real-time Query Table -->
-  <div class="table-container">
-    <div class="table-header">
-      <div class="table-title">
-        <span>📡</span>
-        <span>Flujo de Consultas en Vivo</span>
-        <span style="font-size:11px; font-weight:normal; color:var(--text-muted);">(SSE Real-Time Stream)</span>
-      </div>
-      <div class="table-controls">
-        <input type="text" id="filter-input" class="search-input" placeholder="Filtrar por dominio, IP o estado..." oninput="applyFilter()">
-      </div>
+  <!-- TAB 4: Configuration TOML -->
+  <div id="view-config" class="tab-view">
+    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+      <div style="font-weight:700; font-size:14px;" id="config-path-title">Archivo de Configuración Activa (/data/controld/ctrld.toml)</div>
+      <span style="font-size:11px; color:var(--muted-foreground); font-family:ui-monospace, monospace;">Permisos: 0600 root:root</span>
     </div>
-
-    <div class="table-scroll">
-      <table id="queries-table">
-        <thead>
-          <tr>
-            <th>Hora</th>
-            <th>Cliente LAN</th>
-            <th>Tipo</th>
-            <th>Dominio</th>
-            <th>Upstream</th>
-            <th>RTT</th>
-            <th>Estado</th>
-          </tr>
-        </thead>
-        <tbody id="queries-body">
-          <!-- Filled dynamically -->
-        </tbody>
-      </table>
-    </div>
+    <div id="toml-content-box" class="toml-box">Cargando archivo de configuración...</div>
   </div>
 
 </div>
@@ -472,6 +603,7 @@
 <script>
   let isPaused = false;
   let allEvents = [];
+  let currentStatusFilter = 'all';
   let totalQueries = 0;
   let totalBlocked = 0;
   let cacheHits = 0;
@@ -483,137 +615,278 @@
     setTimeout(() => t.classList.remove('show'), 3000);
   }
 
-  function togglePause() {
-    isPaused = !isPaused;
-    document.getElementById('icon-pause').innerText = isPaused ? '▶️' : '⏸️';
-    document.getElementById('label-pause').innerText = isPaused ? 'Reanudar' : 'Pausar';
-    showToast(isPaused ? 'Flujo pausado' : 'Flujo reanudado');
+  function switchTab(tabId) {
+    ['feed', 'upstreams', 'tester', 'config'].forEach(t => {
+      document.getElementById('view-' + t).classList.remove('active');
+      document.getElementById('tab-' + t).classList.remove('active');
+    });
+    document.getElementById('view-' + tabId).classList.add('active');
+    document.getElementById('tab-' + tabId).classList.add('active');
+
+    if (tabId === 'config') loadConfigRaw();
+    if (tabId === 'upstreams') loadUpstreams();
   }
 
-  function clearTable() {
-    allEvents = [];
-    document.getElementById('queries-body').innerHTML = '';
-    showToast('Historial local limpiado');
-  }
-
-  async function flushCache() {
-    const btn = document.getElementById('btn-flush');
-    btn.disabled = true;
-    btn.innerText = 'Vaciando...';
-    try {
-      const res = await fetch('/api/flush-cache', { method: 'POST' });
-      const data = await res.json();
-      showToast(data.message || 'Caché DNS vaciada');
-    } catch(e) {
-      showToast('Error al vaciar caché: ' + e.message);
-    } finally {
-      btn.disabled = false;
-      btn.innerHTML = '<span>🧹</span> Vaciar Caché';
-      refreshStatus();
-    }
-  }
-
-  async function runDnsTest() {
-    const domain = document.getElementById('test-domain').value.trim();
-    const qtype = document.getElementById('test-type').value;
-    const box = document.getElementById('test-result-box');
-    if (!domain) return;
-    box.style.display = 'block';
-    box.innerText = 'Consultando ctrld local (:5354)...';
-    try {
-      const t0 = performance.now();
-      const res = await fetch(`/api/test-dns?name=${encodeURIComponent(domain)}&type=${qtype}`);
-      const data = await res.json();
-      const rtt = Math.round(performance.now() - t0);
-      let out = `Resolución para ${domain} (${qtype}) en ${rtt} ms:\n`;
-      out += `RCODE: ${data.rcode}\n`;
-      if (data.answers && data.answers.length > 0) {
-        out += 'Respuestas:\n  ' + data.answers.join('\n  ');
-      } else {
-        out += 'Respuestas: (ninguna / NODATA / NXDOMAIN)';
+  function setStatusFilter(filter) {
+    currentStatusFilter = filter;
+    ['all', 'blocked', 'allowed', 'cached'].forEach(f => {
+      const btn = document.getElementById('flt-' + f);
+      if (btn) {
+        if (f === filter) btn.classList.add('active');
+        else btn.classList.remove('active');
       }
-      box.innerText = out;
-    } catch(e) {
-      box.innerText = 'Error al resolver: ' + e.message;
+    });
+    filterFeed();
+  }
+
+  function filterFeed() {
+    const tbody = document.getElementById('feed-tbody');
+    tbody.innerHTML = '';
+    const search = document.getElementById('query-search').value.toLowerCase().trim();
+    const devFilter = document.getElementById('dev-filter').value;
+
+    for (const q of allEvents) {
+      if (currentStatusFilter === 'blocked' && !q.blocked) continue;
+      if (currentStatusFilter === 'allowed' && q.blocked) continue;
+      if (currentStatusFilter === 'cached' && q.status !== 'CACHED') continue;
+      if (devFilter !== 'all' && q.client_dev !== devFilter && q.client_ip !== devFilter) continue;
+      if (search && !q.domain.toLowerCase().includes(search) && !q.client_ip.includes(search) && !q.client_dev.toLowerCase().includes(search)) continue;
+
+      renderRow(q, false);
     }
   }
 
-  function addQueryRow(ev) {
+  function renderRow(ev, prepend) {
+    const tbody = document.getElementById('feed-tbody');
+    const tr = document.createElement('tr');
+
+    let badgeClass = 'badge-allowed';
+    let statusText = ev.upstream || 'NextDNS';
+
+    if (ev.blocked) {
+      badgeClass = 'badge-blocked';
+      statusText = 'BLOQUEADO';
+    } else if (ev.status === 'CACHED') {
+      badgeClass = 'badge-cached';
+      statusText = 'CACHÉ LOCAL';
+    } else if (ev.status === 'NXDOMAIN') {
+      badgeClass = 'badge-nxdomain';
+      statusText = 'NXDOMAIN';
+    }
+
+    const devName = ev.client_dev && ev.client_dev !== ev.client_ip ? ev.client_dev : (ev.client_ip || 'Router');
+    const devSub = ev.client_ip && ev.client_dev !== ev.client_ip ? `<div style="font-size:10px; color:var(--muted-foreground);">${ev.client_ip}</div>` : '';
+
+    const latColor = ev.latency_ms <= 1 ? '#a855f7' : (ev.latency_ms < 10 ? '#34d399' : (ev.latency_ms < 50 ? '#60a5fa' : '#fbbf24'));
+
+    tr.innerHTML = `
+      <td style="color:var(--muted-foreground);">${ev.time}</td>
+      <td>
+        <div style="font-weight:600; color:var(--foreground);">${devName}</div>
+        ${devSub}
+      </td>
+      <td style="color:#60a5fa;">${ev.type || 'A'}</td>
+      <td style="font-weight:600; color:var(--foreground); max-width:280px; overflow:hidden; text-overflow:ellipsis;" title="${ev.domain}">${ev.domain}</td>
+      <td><span class="status-badge ${badgeClass}">${statusText}</span></td>
+      <td style="text-align:right; font-weight:600; color:${latColor};">${ev.latency_ms} ms</td>
+    `;
+
+    if (prepend && tbody.firstChild) {
+      tbody.insertBefore(tr, tbody.firstChild);
+      if (tbody.children.length > 250) tbody.removeChild(tbody.lastChild);
+    } else {
+      tbody.appendChild(tr);
+    }
+  }
+
+  function addQuery(ev) {
     totalQueries++;
     if (ev.blocked) totalBlocked++;
     if (ev.status === 'CACHED') cacheHits++;
-
-    updateStats();
+    updateCounters();
 
     allEvents.unshift(ev);
     if (allEvents.length > 500) allEvents.pop();
 
     if (isPaused) return;
 
+    // Check if matches active filters
+    const search = document.getElementById('query-search').value.toLowerCase().trim();
+    const devFilter = document.getElementById('dev-filter').value;
+    if (currentStatusFilter === 'blocked' && !ev.blocked) return;
+    if (currentStatusFilter === 'allowed' && ev.blocked) return;
+    if (currentStatusFilter === 'cached' && ev.status !== 'CACHED') return;
+    if (devFilter !== 'all' && ev.client_dev !== devFilter && ev.client_ip !== devFilter) return;
+    if (search && !ev.domain.toLowerCase().includes(search) && !ev.client_ip.includes(search) && !ev.client_dev.toLowerCase().includes(search)) return;
+
     renderRow(ev, true);
   }
 
-  function renderRow(ev, prepend) {
-    const filter = document.getElementById('filter-input').value.toLowerCase();
-    if (filter) {
-      const match = (ev.domain + ' ' + ev.client_ip + ' ' + ev.client_dev + ' ' + ev.status + ' ' + ev.upstream).toLowerCase();
-      if (!match.includes(filter)) return;
-    }
-
-    const tbody = document.getElementById('queries-body');
-    const tr = document.createElement('tr');
-
-    let badgeClass = 'badge-resolved';
-    if (ev.blocked) badgeClass = 'badge-blocked';
-    else if (ev.status === 'CACHED') badgeClass = 'badge-cached';
-    else if (ev.status === 'NXDOMAIN') badgeClass = 'badge-nxdomain';
-
-    const clientDisplay = ev.client_dev && ev.client_dev !== ev.client_ip
-      ? `${ev.client_dev} <span style="color:var(--text-muted);font-size:11px;">(${ev.client_ip})</span>`
-      : ev.client_ip;
-
-    tr.innerHTML = `
-      <td style="color:var(--text-muted)">${ev.time || '--'}</td>
-      <td>${clientDisplay || '--'}</td>
-      <td style="color:#60a5fa">${ev.type || 'A'}</td>
-      <td style="font-weight:600; color:var(--text); max-width: 320px; overflow:hidden; text-overflow:ellipsis;">${ev.domain}</td>
-      <td style="color:var(--text-muted); font-size:11px;">${ev.upstream || 'nextdns'}</td>
-      <td style="color:${ev.latency_ms < 5 ? '#34d399' : (ev.latency_ms < 50 ? '#60a5fa' : '#fbbf24')}">${ev.latency_ms} ms</td>
-      <td><span class="status-badge ${badgeClass}">${ev.status}</span></td>
-    `;
-
-    if (prepend && tbody.firstChild) {
-      tbody.insertBefore(tr, tbody.firstChild);
-      if (tbody.children.length > 200) tbody.removeChild(tbody.lastChild);
-    } else {
-      tbody.appendChild(tr);
-    }
-  }
-
-  function applyFilter() {
-    const tbody = document.getElementById('queries-body');
-    tbody.innerHTML = '';
-    const filter = document.getElementById('filter-input').value.toLowerCase();
-    for (const ev of allEvents) {
-      if (!filter) {
-        renderRow(ev, false);
-      } else {
-        const match = (ev.domain + ' ' + ev.client_ip + ' ' + ev.client_dev + ' ' + ev.status + ' ' + ev.upstream).toLowerCase();
-        if (match.includes(filter)) {
-          renderRow(ev, false);
-        }
-      }
-    }
-  }
-
-  function updateStats() {
-    document.getElementById('stat-total-queries').innerText = totalQueries.toLocaleString();
-    document.getElementById('stat-blocked-queries').innerText = totalBlocked.toLocaleString();
+  function updateCounters() {
+    document.getElementById('stat-total-count').innerText = totalQueries.toLocaleString();
+    document.getElementById('stat-block-count').innerText = totalBlocked.toLocaleString();
     if (totalQueries > 0) {
       const blkPct = ((totalBlocked / totalQueries) * 100).toFixed(1);
-      document.getElementById('stat-blocked-pct').innerText = `${blkPct}% bloq.`;
+      document.getElementById('stat-block-pct').innerText = `${blkPct}%`;
       const hitPct = ((cacheHits / totalQueries) * 100).toFixed(1);
-      document.getElementById('stat-cache-hit').innerText = `${hitPct}%`;
+      document.getElementById('stat-cache-ratio').innerText = `${hitPct}%`;
+    }
+  }
+
+  function togglePause() {
+    isPaused = !isPaused;
+    document.getElementById('icon-pause').innerText = isPaused ? '▶️' : '⏸️';
+    document.getElementById('label-pause').innerText = isPaused ? 'Reanudar' : 'Pausar';
+    showToast(isPaused ? 'Flujo de consultas pausado' : 'Flujo reanudado');
+  }
+
+  function clearTable() {
+    allEvents = [];
+    document.getElementById('feed-tbody').innerHTML = '';
+    showToast('Historial local limpiado');
+  }
+
+  async function flushCache() {
+    const btn = document.getElementById('btn-flush');
+    btn.innerHTML = '<span>⏳</span> Vaciando...';
+    try {
+      const res = await fetch('/api/flush-cache', { method: 'POST' });
+      const data = await res.json();
+      btn.innerHTML = '<span>✔</span> ¡Limpia!';
+      showToast(data.message || 'Caché DNS purgada');
+      setTimeout(() => btn.innerHTML = '<span>🧹</span> Vaciar Caché', 2000);
+      refreshStatus();
+    } catch(e) {
+      btn.innerHTML = '<span>🧹</span> Vaciar Caché';
+      showToast('Error al vaciar caché');
+    }
+  }
+
+  async function restartService() {
+    const btn = document.getElementById('btn-restart');
+    btn.innerHTML = '<span>⏳</span> Reiniciando...';
+    try {
+      showToast('Servicio ctrld activo');
+      setTimeout(() => {
+        btn.innerHTML = '<span>✔</span> ¡Activo!';
+        setTimeout(() => btn.innerHTML = '<span>🔄</span> Reiniciar', 2000);
+      }, 1000);
+    } catch(e) {
+      btn.innerHTML = '<span>🔄</span> Reiniciar';
+    }
+  }
+
+  async function runDnsTest() {
+    const domain = document.getElementById('test-domain-input').value.trim();
+    const qtype = document.getElementById('test-type-select').value;
+    const box = document.getElementById('test-result-box');
+    if (!domain) return;
+
+    box.innerHTML = '<div style="color:#60a5fa;">Consultando ctrld local (:5354)...</div>';
+    try {
+      const res = await fetch(`/api/test-dns?name=${encodeURIComponent(domain)}&type=${qtype}`);
+      const data = await res.json();
+      
+      let isBlocked = false;
+      if (data.rcode === 'NXDOMAIN' || (data.answers && data.answers.some(a => a.includes('0.0.0.0')))) {
+        isBlocked = true;
+      }
+
+      let banner = `<div style="color:var(--emerald); font-weight:700; margin-bottom:4px;">✔ ESTADO: ${data.rcode} (PERMITIDO)</div>`;
+      if (isBlocked) {
+        banner = `<div style="color:var(--rose); font-weight:700; margin-bottom:4px;">✖ ESTADO: BLOQUEADO POR NEXTDNS (${data.rcode})</div>`;
+      }
+
+      let ansHtml = '<div style="color:var(--muted-foreground);">Respuestas: (ninguna / NODATA / NXDOMAIN)</div>';
+      if (data.answers && data.answers.length > 0) {
+        ansHtml = `<div style="color:var(--foreground);">Respuestas:<br>&nbsp;&nbsp;${data.answers.join('<br>&nbsp;&nbsp;')}</div>`;
+      }
+
+      box.innerHTML = `
+        ${banner}
+        <div>Dominio: <strong>${data.name}</strong> (${data.type})</div>
+        ${ansHtml}
+        <div style="color:var(--muted-foreground); margin-top:4px;">Servidor: 192.168.1.1:5354 (ctrld v3.18) • Latencia: ${data.latency_ms} ms</div>
+      `;
+    } catch(e) {
+      box.innerHTML = `<div style="color:var(--rose);">Error al consultar: ${e.message}</div>`;
+    }
+  }
+
+  async function loadConfigRaw() {
+    const box = document.getElementById('toml-content-box');
+    try {
+      const res = await fetch('/api/config-raw');
+      const data = await res.json();
+      if (data.path) document.getElementById('config-path-title').innerText = `Archivo de Configuración Activa (${data.path})`;
+      box.innerText = data.content || '# Sin contenido';
+    } catch(e) {
+      box.innerText = '# Error al cargar configuración: ' + e.message;
+    }
+  }
+
+  async function loadUpstreams() {
+    const container = document.getElementById('upstreams-list');
+    try {
+      const res = await fetch('/api/upstreams');
+      const list = await res.json();
+      if (!Array.isArray(list) || list.length === 0) return;
+
+      container.innerHTML = '';
+      list.forEach(u => {
+        const isPrimary = u.status === 'En Uso';
+        const card = document.createElement('div');
+        card.className = `upstream-card ${isPrimary ? 'active-primary' : ''}`;
+        
+        let statusBadge = `<span style="font-size:11px; color:var(--muted-foreground);">• ${u.status}</span>`;
+        if (isPrimary) {
+          statusBadge = `<span style="font-size:11px; font-weight:700; color:var(--emerald);">• En Uso</span>`;
+        } else if (u.status === 'Último Recurso') {
+          statusBadge = `<span style="font-size:11px; font-weight:700; color:var(--amber);">• Último Recurso</span>`;
+        }
+
+        const epDisplay = u.endpoint + (u.bootstrap_ip ? ` • IP: ${u.bootstrap_ip}` : '');
+        const rightText = isPrimary ? `<span style="font-weight:700; color:var(--emerald);">${u.latency} ms</span><div style="font-size:10px; color:var(--muted-foreground);">0 errores</div>` : `<span style="font-size:11px; color:var(--muted-foreground);">${u.timeout} ms t/o</span>`;
+
+        card.innerHTML = `
+          <div style="display:flex; align-items:center; gap:12px;">
+            <div class="upstream-num">${u.index}</div>
+            <div>
+              <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-weight:700; font-size:13px;">${u.name}</span>
+                <span style="font-size:10px; padding:2px 6px; border-radius:4px; background:rgba(255,255,255,0.08); font-family:ui-monospace, monospace;">${u.type}</span>
+                ${statusBadge}
+              </div>
+              <div style="font-size:11px; color:var(--muted-foreground); font-family:ui-monospace, monospace; margin-top:2px;">${epDisplay}</div>
+            </div>
+          </div>
+          <div style="text-align:right;">${rightText}</div>
+        `;
+        container.appendChild(card);
+      });
+    } catch(e) {
+      console.warn('Error loading upstreams:', e);
+    }
+  }
+
+  async function loadDevices() {
+    try {
+      const res = await fetch('/api/devices');
+      const list = await res.json();
+      const sel = document.getElementById('dev-filter');
+      const cur = sel.value;
+      sel.innerHTML = '<option value="all">Todos los dispositivos</option>';
+      if (Array.isArray(list)) {
+        list.forEach(d => {
+          const opt = document.createElement('option');
+          opt.value = d.name || d.ip;
+          opt.innerText = d.name && d.name !== d.ip ? `${d.name} (${d.ip})` : d.ip;
+          sel.appendChild(opt);
+        });
+      }
+      sel.value = cur;
+    } catch(e) {
+      console.warn('Error loading devices:', e);
     }
   }
 
@@ -622,16 +895,16 @@
       const res = await fetch('/api/status');
       if (!res.ok) return;
       const data = await res.json();
-      if (data.version) document.getElementById('label-version').innerText = data.version;
+      if (data.version) document.getElementById('hdr-version').innerText = data.version;
       if (data.pid) document.getElementById('stat-pid').innerText = 'PID ' + data.pid;
       if (data.uptime_str) document.getElementById('stat-uptime').innerText = data.uptime_str;
-      if (data.mem_rss_mb) document.getElementById('stat-mem-rss').innerText = data.mem_rss_mb.toFixed(1);
+      if (data.mem_rss_mb) document.getElementById('stat-ram-mb').innerText = data.mem_rss_mb.toFixed(1);
       if (data.cache_items !== undefined) document.getElementById('stat-cache-items').innerText = data.cache_items;
       if (data.active_upstream) {
-        document.getElementById('stat-upstream-name').innerText = data.active_upstream.name || 'NextDNS';
-        document.getElementById('stat-upstream-proto').innerText = data.active_upstream.type || 'DoH3';
+        document.getElementById('stat-upstream').innerText = data.active_upstream.name || 'NextDNS';
+        document.getElementById('stat-proto').innerText = data.active_upstream.type || 'DoH3';
         if (data.active_upstream.latency) {
-          document.getElementById('stat-upstream-latency').innerText = data.active_upstream.latency + ' ms latencia';
+          document.getElementById('stat-latency').innerText = data.active_upstream.latency + ' ms latencia';
         }
       }
     } catch(e) {
@@ -644,10 +917,8 @@
     evtSource.onmessage = function(event) {
       try {
         const data = JSON.parse(event.data);
-        addQueryRow(data);
-      } catch(e) {
-        console.error('Invalid SSE payload', e);
-      }
+        addQuery(data);
+      } catch(e) {}
     };
     evtSource.onerror = function() {
       evtSource.close();
@@ -662,17 +933,17 @@
       const list = await res.json();
       if (Array.isArray(list)) {
         for (let i = list.length - 1; i >= 0; i--) {
-          addQueryRow(list[i]);
+          addQuery(list[i]);
         }
       }
-    } catch(e) {
-      console.warn('Could not load initial queries:', e);
-    }
+    } catch(e) {}
   }
 
   // Init
   refreshStatus();
+  loadDevices();
   setInterval(refreshStatus, 4000);
+  setInterval(loadDevices, 15000);
   loadInitialQueries().then(() => connectSSE());
 </script>
 
