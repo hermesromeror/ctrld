@@ -387,6 +387,24 @@
       white-space: pre;
       line-height: 1.6;
     }
+    .toml-editor {
+      width: 100%;
+      height: 480px;
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 16px;
+      background: #070a11;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      color: #34d399;
+      line-height: 1.6;
+      resize: vertical;
+      outline: none;
+      tab-size: 2;
+    }
+    .toml-editor:focus {
+      border-color: #3b82f6;
+    }
 
     .toast {
       position: fixed;
@@ -589,11 +607,34 @@
 
   <!-- TAB 4: Configuration TOML -->
   <div id="view-config" class="tab-view">
-    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-      <div style="font-weight:700; font-size:14px;" id="config-path-title">Archivo de Configuración Activa (/data/controld/ctrld.toml)</div>
-      <span style="font-size:11px; color:var(--muted-foreground); font-family:ui-monospace, monospace;">Permisos: 0600 root:root</span>
+    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+      <div>
+        <div style="font-weight:700; font-size:14px;" id="config-path-title">Archivo de Configuración Activa (/data/controld/ctrld.toml)</div>
+        <div style="display:flex; align-items:center; gap:8px; margin-top:2px;">
+          <span style="font-size:11px; color:var(--muted-foreground); font-family:ui-monospace, monospace;">Permisos: 0600 root:root</span>
+          <span id="config-status-badge" style="font-size:11px; font-weight:600; color:var(--emerald);">● Sin cambios</span>
+        </div>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <button onclick="discardConfigChanges()" id="btn-discard-config" style="padding:6px 12px; font-size:12px;">
+          <span>↺</span> Descartar
+        </button>
+        <button onclick="saveConfig()" id="btn-save-config" class="primary" style="padding:6px 14px; font-size:12px; background:var(--emerald); border-color:var(--emerald);">
+          <span>💾</span> Guardar y Aplicar
+        </button>
+      </div>
     </div>
-    <div id="toml-content-box" class="toml-box">Cargando archivo de configuración...</div>
+
+    <!-- Error banner -->
+    <div id="config-error-banner" style="display:none; padding:10px 14px; border-radius:8px; background:var(--rose-bg); border:1px solid rgba(244,63,94,0.3); color:#fca5a5; font-family:ui-monospace, monospace; font-size:12px; white-space:pre-wrap;"></div>
+
+    <!-- TOML Editor Textarea -->
+    <textarea id="toml-editor" spellcheck="false" class="toml-editor" placeholder="Cargando configuración..."></textarea>
+
+    <div style="font-size:11px; color:var(--muted-foreground); display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px;">
+      <span>💡 Al guardar, <code>ctrld</code> valida automáticamente la sintaxis TOML, crea un respaldo (<code>.bak.timestamp</code>) en <code>/data/controld/</code> y recarga en caliente sin cortes de red.</span>
+      <span id="backup-notice" style="color:#60a5fa; font-family:ui-monospace, monospace;"></span>
+    </div>
   </div>
 
 </div>
@@ -813,15 +854,81 @@
     }
   }
 
+  let originalToml = '';
+
   async function loadConfigRaw() {
-    const box = document.getElementById('toml-content-box');
+    const editor = document.getElementById('toml-editor');
+    const errBanner = document.getElementById('config-error-banner');
+    errBanner.style.display = 'none';
     try {
       const res = await fetch('/api/config-raw');
       const data = await res.json();
       if (data.path) document.getElementById('config-path-title').innerText = `Archivo de Configuración Activa (${data.path})`;
-      box.innerText = data.content || '# Sin contenido';
+      originalToml = data.content || '';
+      editor.value = originalToml;
+      updateConfigStatusBadge();
     } catch(e) {
-      box.innerText = '# Error al cargar configuración: ' + e.message;
+      editor.value = '# Error al cargar configuración: ' + e.message;
+    }
+  }
+
+  function updateConfigStatusBadge() {
+    const editor = document.getElementById('toml-editor');
+    const badge = document.getElementById('config-status-badge');
+    const isDirty = editor.value !== originalToml;
+    if (isDirty) {
+      badge.innerText = '● Modificado (sin guardar)';
+      badge.style.color = 'var(--amber)';
+    } else {
+      badge.innerText = '● Sin cambios';
+      badge.style.color = 'var(--emerald)';
+    }
+  }
+
+  function discardConfigChanges() {
+    const editor = document.getElementById('toml-editor');
+    editor.value = originalToml;
+    document.getElementById('config-error-banner').style.display = 'none';
+    updateConfigStatusBadge();
+    showToast('Cambios descartados');
+  }
+
+  async function saveConfig() {
+    const editor = document.getElementById('toml-editor');
+    const btn = document.getElementById('btn-save-config');
+    const errBanner = document.getElementById('config-error-banner');
+    errBanner.style.display = 'none';
+
+    btn.disabled = true;
+    btn.innerHTML = '<span>⏳</span> Guardando...';
+
+    try {
+      const res = await fetch('/api/config-save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: editor.value })
+      });
+      const data = await res.json();
+      if (!res.ok || data.status === 'error') {
+        errBanner.innerText = data.message || 'Error al guardar configuración';
+        errBanner.style.display = 'block';
+        showToast('Error de validación al guardar');
+      } else {
+        originalToml = editor.value;
+        updateConfigStatusBadge();
+        showToast('Configuración guardada y recargada');
+        if (data.backup) {
+          document.getElementById('backup-notice').innerText = 'Respaldo: ' + data.backup.split('/').pop();
+        }
+        setTimeout(() => refreshStatus(), 1000);
+      }
+    } catch(e) {
+      errBanner.innerText = 'Error de conexión: ' + e.message;
+      errBanner.style.display = 'block';
+      showToast('Error al conectar con el servidor');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<span>💾</span> Guardar y Aplicar';
     }
   }
 
@@ -945,6 +1052,11 @@
   setInterval(refreshStatus, 4000);
   setInterval(loadDevices, 15000);
   loadInitialQueries().then(() => connectSSE());
+
+  const tomlTextarea = document.getElementById('toml-editor');
+  if (tomlTextarea) {
+    tomlTextarea.addEventListener('input', updateConfigStatusBadge);
+  }
 </script>
 
 </body>

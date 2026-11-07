@@ -14,7 +14,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Control-D-Inc/ctrld"
 	"github.com/miekg/dns"
+	"github.com/pelletier/go-toml/v2"
 )
 
 //go:embed web/index.html
@@ -443,6 +445,112 @@ func (ws *webServer) registerRoutes() {
 		}
 		_ = json.NewEncoder(w).Encode(list)
 	})
+
+	// POST /api/config-save
+	ws.mux.HandleFunc("/api/config-save", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"status":"error","message":"Method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			Content string `json:"content"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"status":"error","message":"Cuerpo JSON inválido"}`, http.StatusBadRequest)
+			return
+		}
+
+		content := strings.TrimSpace(req.Content)
+		if content == "" {
+			http.Error(w, `{"status":"error","message":"El contenido de configuración no puede estar vacío"}`, http.StatusBadRequest)
+			return
+		}
+
+		// Validar sintaxis TOML antes de escribir
+		var testCfg ctrld.Config
+		if err := toml.Unmarshal([]byte(content), &testCfg); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":  "error",
+				"message": fmt.Sprintf("Error de sintaxis TOML: %s", err.Error()),
+			})
+			return
+		}
+
+		filePath := configPath
+		if filePath == "" {
+			filePath = "/data/controld/ctrld.toml"
+		}
+
+		// Crear respaldo timestamped antes de sobrescribir
+		oldData, err := os.ReadFile(filePath)
+		var bakPath string
+		if err == nil {
+			bakPath = fmt.Sprintf("%s.bak.%s", filePath, time.Now().Format("20060102_150405"))
+			_ = os.WriteFile(bakPath, oldData, 0600)
+		}
+
+		// Escritura atómica a archivo temporal y rename
+		tmpFile := filePath + ".tmp"
+		if err := os.WriteFile(tmpFile, []byte(req.Content), 0600); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":  "error",
+				"message": fmt.Sprintf("No se pudo escribir archivo temporal: %s", err.Error()),
+			})
+			return
+		}
+
+		if err := os.Rename(tmpFile, filePath); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":  "error",
+				"message": fmt.Sprintf("No se pudo aplicar el archivo de configuración: %s", err.Error()),
+			})
+			return
+		}
+
+		// Recarga en caliente en background
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			_ = ws.p.reloadConfig()
+		}()
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":  "ok",
+			"message": "Configuración guardada y recargada exitosamente.",
+			"backup":  bakPath,
+			"path":    filePath,
+		})
+	})
+
+	// POST /api/restart
+	ws.mux.HandleFunc("/api/restart", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"status":"error","message":"Method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":  "ok",
+			"message": "Reinicio y recarga en caliente en progreso...",
+		})
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			_ = ws.p.reloadConfig()
+		}()
+	})
+}
+
+func (p *prog) reloadConfig() error {
+	select {
+	case p.apiReloadCh <- nil:
+		return nil
+	default:
+		return p.sendReloadSignal()
+	}
 }
 
 func (ws *webServer) start() error {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -264,3 +265,58 @@ func TestRecordWebQueryEvent(t *testing.T) {
 		t.Errorf("expected canonical domain adservice.google.com, got %s", ev.Domain)
 	}
 }
+
+func TestConfigSaveValidation(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgFile := tmpDir + "/ctrld.toml"
+	oldPath := configPath
+	configPath = cfgFile
+	defer func() { configPath = oldPath }()
+
+	_ = os.WriteFile(cfgFile, []byte("[service]\n  log_level = 'info'\n"), 0600)
+
+	p := &prog{
+		cfg: &ctrld.Config{
+			Web: &ctrld.WebConfig{Enable: true},
+		},
+	}
+	ws, _ := p.newWebServer()
+
+	// 1. Invalid TOML syntax
+	body := strings.NewReader(`{"content":"[service\nlog_level = 'unclosed"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/config-save", body)
+	rec := httptest.NewRecorder()
+	ws.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request for invalid TOML, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "Error de sintaxis TOML") {
+		t.Errorf("missing syntax error description: %s", rec.Body.String())
+	}
+
+	// 2. Empty content
+	body = strings.NewReader(`{"content":""}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/config-save", body)
+	rec = httptest.NewRecorder()
+	ws.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request for empty content, got %d", rec.Code)
+	}
+
+	// 3. Valid TOML save
+	validToml := "[service]\n  log_level = 'debug'\n[web]\n  enable = true\n"
+	payload, _ := json.Marshal(map[string]string{"content": validToml})
+	req = httptest.NewRequest(http.MethodPost, "/api/config-save", strings.NewReader(string(payload)))
+	rec = httptest.NewRecorder()
+	ws.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for valid save, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Check file was updated
+	saved, _ := os.ReadFile(cfgFile)
+	if string(saved) != validToml {
+		t.Errorf("saved content mismatch: %s", string(saved))
+	}
+}
+
