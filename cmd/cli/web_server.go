@@ -286,6 +286,7 @@ func (ws *webServer) registerRoutes() {
 		m := new(dns.Msg)
 		m.SetQuestion(name, qtype)
 		m.RecursionDesired = true
+		m.SetEdns0(1232, false)
 
 		c := new(dns.Client)
 		c.Timeout = 3 * time.Second
