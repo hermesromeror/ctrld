@@ -168,6 +168,15 @@ type Config struct {
 	Listener map[string]*ListenerConfig `mapstructure:"listener" toml:"listener" validate:"min=1,dive"`
 	Network  map[string]*NetworkConfig  `mapstructure:"network" toml:"network" validate:"min=1,dive"`
 	Upstream map[string]*UpstreamConfig `mapstructure:"upstream" toml:"upstream" validate:"min=1,dive"`
+	Web      *WebConfig                 `mapstructure:"web" toml:"web,omitempty"`
+}
+
+// WebConfig specifies the embedded web management interface config.
+type WebConfig struct {
+	Enable    bool   `mapstructure:"enable" toml:"enable"`
+	ListenIP  string `mapstructure:"listen_ip" toml:"listen_ip,omitempty"`
+	Port      int    `mapstructure:"port" toml:"port,omitempty"`
+	AuthToken string `mapstructure:"auth_token" toml:"auth_token,omitempty"`
 }
 
 // HasUpstreamSendClientInfo reports whether the config has any upstream

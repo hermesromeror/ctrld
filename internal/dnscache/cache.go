@@ -15,6 +15,7 @@ type Cacher interface {
 	Get(Key) *Value
 	Add(Key, *Value)
 	Purge()
+	Len() int
 }
 
 // Key is the caching key for DNS message.
@@ -66,6 +67,14 @@ func (l *LRUCache) Add(key Key, value *Value) {
 // Purge clears the cache.
 func (l *LRUCache) Purge() {
 	l.cacher.Purge()
+}
+
+// Len returns the current number of items stored in the cache.
+func (l *LRUCache) Len() int {
+	if l == nil || l.cacher == nil {
+		return 0
+	}
+	return l.cacher.Len()
 }
 
 // NewLRUCache creates a new LRUCache instance with given size.

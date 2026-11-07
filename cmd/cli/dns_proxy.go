@@ -276,6 +276,8 @@ func (p *prog) serveDNS(listenerNum string) error {
 		labelValues = append(labelValues, ci.Hostname)
 
 		var answer *dns.Msg
+		var rtt time.Duration
+		upstream := ""
 		if !ur.matched && listenerConfig.Restricted {
 			ctrld.Log(ctx, mainLog.Load().Info(), "query refused, %s does not match any network policy", remoteAddr.String())
 			answer = new(dns.Msg)
@@ -299,9 +301,9 @@ func (p *prog) serveDNS(listenerNum string) error {
 			go p.doSelfUninstall(pr.answer)
 
 			answer = pr.answer
-			rtt := time.Since(t)
+			rtt = time.Since(t)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "received response of %d bytes in %s", answer.Len(), rtt)
-			upstream := pr.upstream
+			upstream = pr.upstream
 			switch {
 			case pr.cached:
 				upstream = "cache"
@@ -318,6 +320,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 			p.WithLabelValuesInc(statsQueriesCount, labelValues...)
 			p.WithLabelValuesInc(statsClientQueriesCount, []string{ci.IP, ci.Mac, ci.Hostname}...)
 			p.forceFetchingAPI(domain)
+			p.recordWebQueryEvent(q, answer, ci, rtt, upstream)
 		}()
 		if err := w.WriteMsg(answer); err != nil {
 			ctrld.Log(ctx, p.querySampler.event(sampleClassSendResponseFailed, "").Err(err), "serveDNS: failed to send DNS response to client")

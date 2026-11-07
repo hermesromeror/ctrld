@@ -132,6 +132,8 @@ type prog struct {
 	ptrLoopGuard              *loopGuard
 	lanLoopGuard              *loopGuard
 	metricsQueryStats         atomic.Bool
+	webRingBuf                *WebRingBuffer
+	webServer                 *webServer
 	queryFromSelfMap          sync.Map
 	initInternalLogWriterOnce sync.Once
 	internalLogWriter         *logWriter
@@ -1201,6 +1203,13 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	go func() {
 		defer wg.Done()
 		p.runMetricsServer(ctx, reloadCh)
+	}()
+
+	wg.Add(1)
+	// Web dashboard and management API goroutine.
+	go func() {
+		defer wg.Done()
+		p.runWebUI(ctx, reloadCh)
 	}()
 
 	if !reload {
