@@ -290,7 +290,7 @@ func TestConfigSaveValidation(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 Bad Request for invalid TOML, got %d", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "Error de sintaxis TOML") {
+	if !strings.Contains(rec.Body.String(), "TOML syntax error") {
 		t.Errorf("missing syntax error description: %s", rec.Body.String())
 	}
 

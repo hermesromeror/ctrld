@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -373,20 +373,7 @@
       gap: 6px;
     }
 
-    /* TOML Pre Box */
-    .toml-box {
-      border: 1px solid var(--card-border);
-      border-radius: 12px;
-      padding: 16px;
-      background: #070a11;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      font-size: 12px;
-      color: #34d399;
-      max-height: 480px;
-      overflow-x: auto;
-      white-space: pre;
-      line-height: 1.6;
-    }
+    /* TOML Editor Box */
     .toml-editor {
       width: 100%;
       height: 480px;
@@ -450,10 +437,10 @@
     </div>
     <div class="header-actions">
       <button onclick="flushCache()" id="btn-flush">
-        <span>🧹</span> Vaciar Caché
+        <span>🧹</span> Flush Cache
       </button>
       <button onclick="restartService()" id="btn-restart" class="primary">
-        <span>🔄</span> Reiniciar
+        <span>🔄</span> Restart
       </button>
     </div>
   </header>
@@ -463,58 +450,58 @@
     <!-- Card 1: Upstream Status -->
     <div class="metric-card">
       <div class="metric-header">
-        <span>Upstream Activo</span>
+        <span>Active Upstream</span>
         <span class="metric-tag" style="background:var(--emerald-bg); color:var(--emerald);" id="stat-proto">DoH3</span>
       </div>
       <div class="metric-value" id="stat-upstream">NextDNS (anexia-atl-1)</div>
       <div class="metric-footer" style="color:var(--emerald);">
-        <span>●</span> <span id="stat-latency">2.6 ms latencia</span>
+        <span>●</span> <span id="stat-latency">2.6 ms latency</span>
       </div>
     </div>
 
     <!-- Card 2: Memory RAM Real -->
     <div class="metric-card">
       <div class="metric-header">
-        <span>Memoria RAM Real</span>
+        <span>Real RAM Memory</span>
         <span class="metric-tag" style="background:rgba(59,130,246,0.12); color:#60a5fa;" id="stat-ram-pct">0.8%</span>
       </div>
       <div class="metric-value"><span id="stat-ram-mb">32.5</span> <span style="font-size:12px; font-weight:normal; color:var(--muted-foreground)">MB RSS</span></div>
       <div class="metric-footer" style="color:var(--muted-foreground);">
-        <span id="stat-pid">PID 2155616</span> • <span id="stat-uptime">0h 0m</span>
+        <span id="stat-pid">PID 2172768</span> • <span id="stat-uptime">0h 0m</span>
       </div>
     </div>
 
     <!-- Card 3: Cache Hit Ratio -->
     <div class="metric-card">
       <div class="metric-header">
-        <span>Acierto en Caché</span>
+        <span>Cache Hit Ratio</span>
         <span class="metric-tag" style="background:var(--purple-bg); color:#c084fc;">RFC 1035</span>
       </div>
       <div class="metric-value" id="stat-cache-ratio">0.0%</div>
       <div class="metric-footer" style="color:var(--muted-foreground);">
-        <span id="stat-cache-items">0</span> items en RAM (0.0 ms)
+        <span id="stat-cache-items">0</span> items in RAM (0.0 ms)
       </div>
     </div>
 
     <!-- Card 4: Security Block Rate -->
     <div class="metric-card">
       <div class="metric-header">
-        <span>Filtro de Seguridad</span>
+        <span>Security Filter</span>
         <span class="metric-tag" style="background:var(--rose-bg); color:#fb7185;">NextDNS</span>
       </div>
-      <div class="metric-value"><span id="stat-block-pct">0.0%</span> <span style="font-size:12px; font-weight:normal; color:#fb7185;">bloqueado</span></div>
+      <div class="metric-value"><span id="stat-block-pct">0.0%</span> <span style="font-size:12px; font-weight:normal; color:#fb7185;">blocked</span></div>
       <div class="metric-footer" style="color:var(--muted-foreground);">
-        <span id="stat-block-count">0</span> de <span id="stat-total-count">0</span> amenazas/ads
+        <span id="stat-block-count">0</span> of <span id="stat-total-count">0</span> threats/ads
       </div>
     </div>
   </div>
 
   <!-- Interactive Navigation Tabs -->
   <div class="tabs-bar">
-    <button onclick="switchTab('feed')" id="tab-feed" class="tab-btn active">Consultas en Vivo (Live Feed)</button>
-    <button onclick="switchTab('upstreams')" id="tab-upstreams" class="tab-btn">Cadena de Upstreams</button>
-    <button onclick="switchTab('tester')" id="tab-tester" class="tab-btn">Probador DNS en Vivo</button>
-    <button onclick="switchTab('config')" id="tab-config" class="tab-btn">Configuración (TOML)</button>
+    <button onclick="switchTab('feed')" id="tab-feed" class="tab-btn active">Live Feed</button>
+    <button onclick="switchTab('upstreams')" id="tab-upstreams" class="tab-btn">Upstream Chain</button>
+    <button onclick="switchTab('tester')" id="tab-tester" class="tab-btn">Live DNS Resolver</button>
+    <button onclick="switchTab('config')" id="tab-config" class="tab-btn">Configuration (TOML)</button>
   </div>
 
   <!-- TAB 1: Live Feed -->
@@ -522,20 +509,20 @@
     <!-- Search & Filters -->
     <div class="filter-row">
       <div style="flex:1; min-width:220px;">
-        <input type="text" id="query-search" oninput="filterFeed()" placeholder="Buscar por dominio o IP..." style="width:100%;">
+        <input type="text" id="query-search" oninput="filterFeed()" placeholder="Search by domain or client IP..." style="width:100%;">
       </div>
       <div class="filter-group">
-        <button onclick="setStatusFilter('all')" id="flt-all" class="flt-pill active">Todos</button>
-        <button onclick="setStatusFilter('blocked')" id="flt-blocked" class="flt-pill">Bloqueados</button>
-        <button onclick="setStatusFilter('allowed')" id="flt-allowed" class="flt-pill">Permitidos</button>
-        <button onclick="setStatusFilter('cached')" id="flt-cached" class="flt-pill">En Caché</button>
+        <button onclick="setStatusFilter('all')" id="flt-all" class="flt-pill active">All</button>
+        <button onclick="setStatusFilter('blocked')" id="flt-blocked" class="flt-pill">Blocked</button>
+        <button onclick="setStatusFilter('allowed')" id="flt-allowed" class="flt-pill">Allowed</button>
+        <button onclick="setStatusFilter('cached')" id="flt-cached" class="flt-pill">Cached</button>
         <select id="dev-filter" onchange="filterFeed()" style="margin-left:6px;">
-          <option value="all">Todos los dispositivos</option>
+          <option value="all">All devices</option>
         </select>
         <button onclick="togglePause()" id="btn-pause" style="margin-left:6px; padding:5px 10px; font-size:11px;">
-          <span id="icon-pause">⏸️</span> <span id="label-pause">Pausar</span>
+          <span id="icon-pause">⏸️</span> <span id="label-pause">Pause</span>
         </button>
-        <button onclick="clearTable()" style="padding:5px 10px; font-size:11px;">
+        <button onclick="clearTable()" style="padding:5px 10px; font-size:11px;" title="Clear local list">
           <span>🗑️</span>
         </button>
       </div>
@@ -546,12 +533,12 @@
       <table>
         <thead>
           <tr>
-            <th>Hora</th>
-            <th>Dispositivo</th>
-            <th>Tipo</th>
-            <th>Dominio</th>
-            <th>Estado / Upstream</th>
-            <th style="text-align:right;">Latencia</th>
+            <th>Time</th>
+            <th>Client Device</th>
+            <th>Type</th>
+            <th>Domain</th>
+            <th>Status / Upstream</th>
+            <th style="text-align:right;">Latency</th>
           </tr>
         </thead>
         <tbody id="feed-tbody">
@@ -561,18 +548,18 @@
     </div>
 
     <div style="display:flex; justify-content:space-between; align-items:center; font-size:11px; color:var(--muted-foreground);">
-      <span>Mostrando últimas consultas en vivo del daemon <code>ctrld</code>.</span>
+      <span>Showing live DNS queries captured by <code>ctrld</code> daemon.</span>
       <span style="color:var(--emerald); display:flex; align-items:center; gap:5px;">
-        <span class="pulse-dot"></span> Streaming SSE activo
+        <span class="pulse-dot"></span> Active SSE Stream
       </span>
     </div>
   </div>
 
   <!-- TAB 2: Upstreams -->
   <div id="view-upstreams" class="tab-view">
-    <div style="font-weight:700; font-size:14px;">Cadena de Failover Automático de ctrld</div>
+    <div style="font-weight:700; font-size:14px;">ctrld Automatic Failover Chain</div>
     <div style="font-size:12px; color:var(--muted-foreground);">
-      Prioridad en cascada: si el primario no responde en su tiempo de espera (1.5s), <code>ctrld</code> conmuta automáticamente al siguiente resolver.
+      Cascading priority: if primary upstream times out (1.5s), <code>ctrld</code> automatically fails over to the next configured resolver.
     </div>
     <div id="upstreams-list" style="display:flex; flex-direction:column; gap:10px; margin-top:4px;">
       <!-- Populated dynamically from /api/upstreams -->
@@ -581,13 +568,13 @@
 
   <!-- TAB 3: Diagnostic Tester -->
   <div id="view-tester" class="tab-view">
-    <div style="font-weight:700; font-size:14px;">Probador DNS en Vivo (Simulador dig desde Firewalla)</div>
+    <div style="font-weight:700; font-size:14px;">Live DNS Resolver (dig simulator from Firewalla)</div>
     <div style="font-size:12px; color:var(--muted-foreground);">
-      Prueba cualquier dominio para verificar instantáneamente si NextDNS lo permite o lo bloquea, o si se resuelve por caché local.
+      Test any domain to verify in real-time whether NextDNS allows or blocks it, or if it is served from local cache.
     </div>
 
     <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:4px;">
-      <input type="text" id="test-domain-input" value="tracker.hdtvcloud.com" placeholder="Ej: google.com, tracker.hdtvcloud.com" style="flex:1; min-width:220px; font-family:ui-monospace, monospace;">
+      <input type="text" id="test-domain-input" value="tracker.hdtvcloud.com" placeholder="e.g. google.com, tracker.hdtvcloud.com" style="flex:1; min-width:220px; font-family:ui-monospace, monospace;">
       <select id="test-type-select">
         <option value="A">A</option>
         <option value="AAAA">AAAA</option>
@@ -596,12 +583,12 @@
         <option value="MX">MX</option>
       </select>
       <button onclick="runDnsTest()" class="primary">
-        <span>⚡</span> Ejecutar Prueba
+        <span>⚡</span> Run Query
       </button>
     </div>
 
     <div id="test-result-box" class="test-box">
-      <div style="color:var(--muted-foreground);">Introduce un nombre de dominio arriba y presiona "Ejecutar Prueba" para resolverlo en tiempo real contra el proxy local (:5354).</div>
+      <div style="color:var(--muted-foreground);">Enter a domain name above and click "Run Query" to resolve it in real-time against the local proxy (:5354).</div>
     </div>
   </div>
 
@@ -609,18 +596,18 @@
   <div id="view-config" class="tab-view">
     <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
       <div>
-        <div style="font-weight:700; font-size:14px;" id="config-path-title">Archivo de Configuración Activa (/data/controld/ctrld.toml)</div>
+        <div style="font-weight:700; font-size:14px;" id="config-path-title">Active Configuration File (/data/controld/ctrld.toml)</div>
         <div style="display:flex; align-items:center; gap:8px; margin-top:2px;">
-          <span style="font-size:11px; color:var(--muted-foreground); font-family:ui-monospace, monospace;">Permisos: 0600 root:root</span>
-          <span id="config-status-badge" style="font-size:11px; font-weight:600; color:var(--emerald);">● Sin cambios</span>
+          <span style="font-size:11px; color:var(--muted-foreground); font-family:ui-monospace, monospace;">Permissions: 0600 root:root</span>
+          <span id="config-status-badge" style="font-size:11px; font-weight:600; color:var(--emerald);">● No changes</span>
         </div>
       </div>
       <div style="display:flex; align-items:center; gap:8px;">
         <button onclick="discardConfigChanges()" id="btn-discard-config" style="padding:6px 12px; font-size:12px;">
-          <span>↺</span> Descartar
+          <span>↺</span> Discard
         </button>
         <button onclick="saveConfig()" id="btn-save-config" class="primary" style="padding:6px 14px; font-size:12px; background:var(--emerald); border-color:var(--emerald);">
-          <span>💾</span> Guardar y Aplicar
+          <span>💾</span> Save & Apply
         </button>
       </div>
     </div>
@@ -629,17 +616,17 @@
     <div id="config-error-banner" style="display:none; padding:10px 14px; border-radius:8px; background:var(--rose-bg); border:1px solid rgba(244,63,94,0.3); color:#fca5a5; font-family:ui-monospace, monospace; font-size:12px; white-space:pre-wrap;"></div>
 
     <!-- TOML Editor Textarea -->
-    <textarea id="toml-editor" spellcheck="false" class="toml-editor" placeholder="Cargando configuración..."></textarea>
+    <textarea id="toml-editor" spellcheck="false" class="toml-editor" placeholder="Loading configuration..."></textarea>
 
     <div style="font-size:11px; color:var(--muted-foreground); display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px;">
-      <span>💡 Al guardar, <code>ctrld</code> valida automáticamente la sintaxis TOML, crea un respaldo (<code>.bak.timestamp</code>) en <code>/data/controld/</code> y recarga en caliente sin cortes de red.</span>
+      <span>💡 When saving, <code>ctrld</code> automatically validates TOML syntax, creates a timestamped backup (<code>.bak.timestamp</code>) in <code>/data/controld/</code>, and hot-reloads configuration without network interruption.</span>
       <span id="backup-notice" style="color:#60a5fa; font-family:ui-monospace, monospace;"></span>
     </div>
   </div>
 
 </div>
 
-<div id="toast" class="toast">Notificación</div>
+<div id="toast" class="toast">Notification</div>
 
 <script>
   let isPaused = false;
@@ -706,10 +693,10 @@
 
     if (ev.blocked) {
       badgeClass = 'badge-blocked';
-      statusText = 'BLOQUEADO';
+      statusText = 'BLOCKED';
     } else if (ev.status === 'CACHED') {
       badgeClass = 'badge-cached';
-      statusText = 'CACHÉ LOCAL';
+      statusText = 'LOCAL CACHE';
     } else if (ev.status === 'NXDOMAIN') {
       badgeClass = 'badge-nxdomain';
       statusText = 'NXDOMAIN';
@@ -751,7 +738,7 @@
 
     if (isPaused) return;
 
-    // Check if matches active filters
+    // Check active filters
     const search = document.getElementById('query-search').value.toLowerCase().trim();
     const devFilter = document.getElementById('dev-filter').value;
     if (currentStatusFilter === 'blocked' && !ev.blocked) return;
@@ -777,43 +764,44 @@
   function togglePause() {
     isPaused = !isPaused;
     document.getElementById('icon-pause').innerText = isPaused ? '▶️' : '⏸️';
-    document.getElementById('label-pause').innerText = isPaused ? 'Reanudar' : 'Pausar';
-    showToast(isPaused ? 'Flujo de consultas pausado' : 'Flujo reanudado');
+    document.getElementById('label-pause').innerText = isPaused ? 'Resume' : 'Pause';
+    showToast(isPaused ? 'Query stream paused' : 'Query stream resumed');
   }
 
   function clearTable() {
     allEvents = [];
     document.getElementById('feed-tbody').innerHTML = '';
-    showToast('Historial local limpiado');
+    showToast('Local history cleared');
   }
 
   async function flushCache() {
     const btn = document.getElementById('btn-flush');
-    btn.innerHTML = '<span>⏳</span> Vaciando...';
+    btn.innerHTML = '<span>⏳</span> Flushing...';
     try {
       const res = await fetch('/api/flush-cache', { method: 'POST' });
       const data = await res.json();
-      btn.innerHTML = '<span>✔</span> ¡Limpia!';
-      showToast(data.message || 'Caché DNS purgada');
-      setTimeout(() => btn.innerHTML = '<span>🧹</span> Vaciar Caché', 2000);
+      btn.innerHTML = '<span>✔</span> Flushed!';
+      showToast(data.message || 'DNS cache purged');
+      setTimeout(() => btn.innerHTML = '<span>🧹</span> Flush Cache', 2000);
       refreshStatus();
     } catch(e) {
-      btn.innerHTML = '<span>🧹</span> Vaciar Caché';
-      showToast('Error al vaciar caché');
+      btn.innerHTML = '<span>🧹</span> Flush Cache';
+      showToast('Error purging cache');
     }
   }
 
   async function restartService() {
     const btn = document.getElementById('btn-restart');
-    btn.innerHTML = '<span>⏳</span> Reiniciando...';
+    btn.innerHTML = '<span>⏳</span> Restarting...';
     try {
-      showToast('Servicio ctrld activo');
+      await fetch('/api/restart', { method: 'POST' });
+      showToast('ctrld service restarted');
       setTimeout(() => {
-        btn.innerHTML = '<span>✔</span> ¡Activo!';
-        setTimeout(() => btn.innerHTML = '<span>🔄</span> Reiniciar', 2000);
+        btn.innerHTML = '<span>✔</span> Active!';
+        setTimeout(() => btn.innerHTML = '<span>🔄</span> Restart', 2000);
       }, 1000);
     } catch(e) {
-      btn.innerHTML = '<span>🔄</span> Reiniciar';
+      btn.innerHTML = '<span>🔄</span> Restart';
     }
   }
 
@@ -823,7 +811,7 @@
     const box = document.getElementById('test-result-box');
     if (!domain) return;
 
-    box.innerHTML = '<div style="color:#60a5fa;">Consultando ctrld local (:5354)...</div>';
+    box.innerHTML = '<div style="color:#60a5fa;">Querying local ctrld (:5354)...</div>';
     try {
       const res = await fetch(`/api/test-dns?name=${encodeURIComponent(domain)}&type=${qtype}`);
       const data = await res.json();
@@ -832,43 +820,43 @@
       let detailsHtml = '';
 
       if (data.blocked) {
-        // CASO 1: Bloqueado por regla de NextDNS / Adblock / Categoría
-        banner = `<div style="color:var(--rose); font-weight:700; font-size:13px; margin-bottom:6px;">✖ ESTADO: BLOQUEADO POR NEXTDNS</div>`;
-        detailsHtml += `<div>Dominio: <strong>${data.name}</strong> (${data.type})</div>`;
+        // CASE 1: Blocked by NextDNS / Adblock / Category Rule
+        banner = `<div style="color:var(--rose); font-weight:700; font-size:13px; margin-bottom:6px;">✖ STATUS: BLOCKED BY NEXTDNS</div>`;
+        detailsHtml += `<div>Domain: <strong>${data.name}</strong> (${data.type})</div>`;
         if (data.block_reason) {
-          detailsHtml += `<div style="color:#fca5a5; margin-top:3px;">Motivo del Bloqueo: <strong>${data.block_reason}</strong></div>`;
+          detailsHtml += `<div style="color:#fca5a5; margin-top:3px;">Block Reason: <strong>${data.block_reason}</strong></div>`;
         }
         if (data.answers && data.answers.length > 0) {
-          detailsHtml += `<div style="color:var(--muted-foreground); margin-top:3px;">Respuesta devuelta: ${data.answers.join(', ')}</div>`;
+          detailsHtml += `<div style="color:var(--muted-foreground); margin-top:3px;">Returned Answer: ${data.answers.join(', ')}</div>`;
         } else {
-          detailsHtml += `<div style="color:var(--muted-foreground); margin-top:3px;">Respuesta: NODATA (0 registros devueltos por la política de filtrado)</div>`;
+          detailsHtml += `<div style="color:var(--muted-foreground); margin-top:3px;">Returned Answer: NODATA (0 records returned due to policy filtering)</div>`;
         }
       } else if (data.rcode === 'NOERROR' && data.answers && data.answers.length > 0) {
-        // CASO 2: Permitido y resuelto
-        banner = `<div style="color:var(--emerald); font-weight:700; font-size:13px; margin-bottom:6px;">✔ ESTADO: NOERROR (PERMITIDO Y RESUELTO)</div>`;
-        detailsHtml += `<div>Dominio: <strong>${data.name}</strong> (${data.type})</div>`;
-        detailsHtml += `<div style="color:var(--foreground); margin-top:3px;">Respuestas:<br>&nbsp;&nbsp;${data.answers.join('<br>&nbsp;&nbsp;')}</div>`;
+        // CASE 2: Allowed and resolved
+        banner = `<div style="color:var(--emerald); font-weight:700; font-size:13px; margin-bottom:6px;">✔ STATUS: NOERROR (ALLOWED & RESOLVED)</div>`;
+        detailsHtml += `<div>Domain: <strong>${data.name}</strong> (${data.type})</div>`;
+        detailsHtml += `<div style="color:var(--foreground); margin-top:3px;">Answers:<br>&nbsp;&nbsp;${data.answers.join('<br>&nbsp;&nbsp;')}</div>`;
       } else if (data.rcode === 'NXDOMAIN') {
-        // CASO 3: NXDOMAIN (el dominio no existe)
-        banner = `<div style="color:var(--amber); font-weight:700; font-size:13px; margin-bottom:6px;">ℹ ESTADO: NXDOMAIN (EL DOMINIO NO EXISTE)</div>`;
-        detailsHtml += `<div>Dominio: <strong>${data.name}</strong> (${data.type})</div>`;
-        detailsHtml += `<div style="color:var(--muted-foreground); margin-top:3px;">El dominio consultado no está registrado o no existe en los servidores DNS raíz.</div>`;
+        // CASE 3: Legitimate NXDOMAIN (domain does not exist)
+        banner = `<div style="color:var(--amber); font-weight:700; font-size:13px; margin-bottom:6px;">ℹ STATUS: NXDOMAIN (DOMAIN DOES NOT EXIST)</div>`;
+        detailsHtml += `<div>Domain: <strong>${data.name}</strong> (${data.type})</div>`;
+        detailsHtml += `<div style="color:var(--muted-foreground); margin-top:3px;">The requested domain is not registered or does not exist on authoritative root DNS servers.</div>`;
       } else if (data.rcode === 'NOERROR' && (!data.answers || data.answers.length === 0)) {
-        // CASO 4: NODATA sin bloqueo (existe pero no tiene ese registro específico)
-        banner = `<div style="color:#60a5fa; font-weight:700; font-size:13px; margin-bottom:6px;">ℹ ESTADO: NOERROR / NODATA (SIN REGISTRO ${data.type})</div>`;
-        detailsHtml += `<div>Dominio: <strong>${data.name}</strong> (${data.type})</div>`;
-        detailsHtml += `<div style="color:var(--muted-foreground); margin-top:3px;">El dominio existe, pero no tiene registros configurados para el tipo ${data.type}.</div>`;
+        // CASE 4: NODATA without block (name exists, but no record of requested type)
+        banner = `<div style="color:#60a5fa; font-weight:700; font-size:13px; margin-bottom:6px;">ℹ STATUS: NOERROR / NODATA (NO ${data.type} RECORDS CONFIGURED)</div>`;
+        detailsHtml += `<div>Domain: <strong>${data.name}</strong> (${data.type})</div>`;
+        detailsHtml += `<div style="color:var(--muted-foreground); margin-top:3px;">The domain exists, but has no records configured for type ${data.type}.</div>`;
       } else {
-        // CASO 5: Otro RCODE (SERVFAIL, REFUSED, etc.)
-        banner = `<div style="color:var(--amber); font-weight:700; font-size:13px; margin-bottom:6px;">⚠ ESTADO: ${data.rcode}</div>`;
-        detailsHtml += `<div>Dominio: <strong>${data.name}</strong> (${data.type})</div>`;
+        // CASE 5: Other RCODE (SERVFAIL, REFUSED, etc.)
+        banner = `<div style="color:var(--amber); font-weight:700; font-size:13px; margin-bottom:6px;">⚠ STATUS: ${data.rcode}</div>`;
+        detailsHtml += `<div>Domain: <strong>${data.name}</strong> (${data.type})</div>`;
       }
 
-      detailsHtml += `<div style="color:var(--muted-foreground); font-size:11px; margin-top:6px; border-top:1px solid rgba(255,255,255,0.06); padding-top:6px;">Servidor: 192.168.1.1:5354 (ctrld v3.18) • RTT: ${data.latency_ms} ms • RCODE: ${data.rcode}</div>`;
+      detailsHtml += `<div style="color:var(--muted-foreground); font-size:11px; margin-top:6px; border-top:1px solid rgba(255,255,255,0.06); padding-top:6px;">Server: 192.168.1.1:5354 (ctrld v3.18) • RTT: ${data.latency_ms} ms • RCODE: ${data.rcode}</div>`;
 
       box.innerHTML = banner + detailsHtml;
     } catch(e) {
-      box.innerHTML = `<div style="color:var(--rose); font-weight:700;">Error al consultar: ${e.message}</div>`;
+      box.innerHTML = `<div style="color:var(--rose); font-weight:700;">Query error: ${e.message}</div>`;
     }
   }
 
@@ -881,12 +869,12 @@
     try {
       const res = await fetch('/api/config-raw');
       const data = await res.json();
-      if (data.path) document.getElementById('config-path-title').innerText = `Archivo de Configuración Activa (${data.path})`;
+      if (data.path) document.getElementById('config-path-title').innerText = `Active Configuration File (${data.path})`;
       originalToml = data.content || '';
       editor.value = originalToml;
       updateConfigStatusBadge();
     } catch(e) {
-      editor.value = '# Error al cargar configuración: ' + e.message;
+      editor.value = '# Error loading configuration: ' + e.message;
     }
   }
 
@@ -895,10 +883,10 @@
     const badge = document.getElementById('config-status-badge');
     const isDirty = editor.value !== originalToml;
     if (isDirty) {
-      badge.innerText = '● Modificado (sin guardar)';
+      badge.innerText = '● Modified (unsaved)';
       badge.style.color = 'var(--amber)';
     } else {
-      badge.innerText = '● Sin cambios';
+      badge.innerText = '● No changes';
       badge.style.color = 'var(--emerald)';
     }
   }
@@ -908,7 +896,7 @@
     editor.value = originalToml;
     document.getElementById('config-error-banner').style.display = 'none';
     updateConfigStatusBadge();
-    showToast('Cambios descartados');
+    showToast('Changes discarded');
   }
 
   async function saveConfig() {
@@ -918,7 +906,7 @@
     errBanner.style.display = 'none';
 
     btn.disabled = true;
-    btn.innerHTML = '<span>⏳</span> Guardando...';
+    btn.innerHTML = '<span>⏳</span> Saving...';
 
     try {
       const res = await fetch('/api/config-save', {
@@ -928,25 +916,25 @@
       });
       const data = await res.json();
       if (!res.ok || data.status === 'error') {
-        errBanner.innerText = data.message || 'Error al guardar configuración';
+        errBanner.innerText = data.message || 'Error saving configuration';
         errBanner.style.display = 'block';
-        showToast('Error de validación al guardar');
+        showToast('Validation error while saving');
       } else {
         originalToml = editor.value;
         updateConfigStatusBadge();
-        showToast('Configuración guardada y recargada');
+        showToast('Configuration saved & reloaded');
         if (data.backup) {
-          document.getElementById('backup-notice').innerText = 'Respaldo: ' + data.backup.split('/').pop();
+          document.getElementById('backup-notice').innerText = 'Backup: ' + data.backup.split('/').pop();
         }
         setTimeout(() => refreshStatus(), 1000);
       }
     } catch(e) {
-      errBanner.innerText = 'Error de conexión: ' + e.message;
+      errBanner.innerText = 'Connection error: ' + e.message;
       errBanner.style.display = 'block';
-      showToast('Error al conectar con el servidor');
+      showToast('Error connecting to server');
     } finally {
       btn.disabled = false;
-      btn.innerHTML = '<span>💾</span> Guardar y Aplicar';
+      btn.innerHTML = '<span>💾</span> Save & Apply';
     }
   }
 
@@ -959,19 +947,19 @@
 
       container.innerHTML = '';
       list.forEach(u => {
-        const isPrimary = u.status === 'En Uso';
+        const isPrimary = u.status === 'In Use';
         const card = document.createElement('div');
         card.className = `upstream-card ${isPrimary ? 'active-primary' : ''}`;
         
         let statusBadge = `<span style="font-size:11px; color:var(--muted-foreground);">• ${u.status}</span>`;
         if (isPrimary) {
-          statusBadge = `<span style="font-size:11px; font-weight:700; color:var(--emerald);">• En Uso</span>`;
-        } else if (u.status === 'Último Recurso') {
-          statusBadge = `<span style="font-size:11px; font-weight:700; color:var(--amber);">• Último Recurso</span>`;
+          statusBadge = `<span style="font-size:11px; font-weight:700; color:var(--emerald);">• In Use</span>`;
+        } else if (u.status === 'Last Resort') {
+          statusBadge = `<span style="font-size:11px; font-weight:700; color:var(--amber);">• Last Resort</span>`;
         }
 
         const epDisplay = u.endpoint + (u.bootstrap_ip ? ` • IP: ${u.bootstrap_ip}` : '');
-        const rightText = isPrimary ? `<span style="font-weight:700; color:var(--emerald);">${u.latency} ms</span><div style="font-size:10px; color:var(--muted-foreground);">0 errores</div>` : `<span style="font-size:11px; color:var(--muted-foreground);">${u.timeout} ms t/o</span>`;
+        const rightText = isPrimary ? `<span style="font-weight:700; color:var(--emerald);">${u.latency} ms</span><div style="font-size:10px; color:var(--muted-foreground);">0 errors</div>` : `<span style="font-size:11px; color:var(--muted-foreground);">${u.timeout} ms t/o</span>`;
 
         card.innerHTML = `
           <div style="display:flex; align-items:center; gap:12px;">
@@ -1000,7 +988,7 @@
       const list = await res.json();
       const sel = document.getElementById('dev-filter');
       const cur = sel.value;
-      sel.innerHTML = '<option value="all">Todos los dispositivos</option>';
+      sel.innerHTML = '<option value="all">All devices</option>';
       if (Array.isArray(list)) {
         list.forEach(d => {
           const opt = document.createElement('option');
@@ -1029,7 +1017,7 @@
         document.getElementById('stat-upstream').innerText = data.active_upstream.name || 'NextDNS';
         document.getElementById('stat-proto').innerText = data.active_upstream.type || 'DoH3';
         if (data.active_upstream.latency) {
-          document.getElementById('stat-latency').innerText = data.active_upstream.latency + ' ms latencia';
+          document.getElementById('stat-latency').innerText = data.active_upstream.latency + ' ms latency';
         }
       }
     } catch(e) {

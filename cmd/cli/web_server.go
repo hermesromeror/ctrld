@@ -243,7 +243,7 @@ func (ws *webServer) registerRoutes() {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"status":  "ok",
-			"message": "Caché DNS vaciada exitosamente",
+			"message": "DNS cache purged successfully",
 		})
 	})
 
@@ -399,7 +399,7 @@ func (ws *webServer) registerRoutes() {
 		if err != nil {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"path":    filePath,
-				"content": "# Error al leer archivo de configuración: " + err.Error(),
+				"content": "# Error reading configuration file: " + err.Error(),
 				"error":   err.Error(),
 			})
 			return
@@ -421,7 +421,7 @@ func (ws *webServer) registerRoutes() {
 			Endpoint    string  `json:"endpoint"`
 			BootstrapIP string  `json:"bootstrap_ip"`
 			Timeout     int     `json:"timeout"`
-			Status      string  `json:"status"` // "En Uso", "Standby", "Último Recurso"
+			Status      string  `json:"status"` // "In Use", "Standby", "Last Resort"
 			Role        string  `json:"role"`
 			Latency     float64 `json:"latency"`
 		}
@@ -441,15 +441,15 @@ func (ws *webServer) registerRoutes() {
 					continue
 				}
 				status := "Standby"
-				role := "Respaldo"
+				role := "Backup"
 				lat := 0.0
 				if n == 0 {
-					status = "En Uso"
-					role = "Primario"
+					status = "In Use"
+					role = "Primary"
 					lat = 2.6
 				} else if u.Type == "legacy" {
-					status = "Último Recurso"
-					role = "Fallback ISP"
+					status = "Last Resort"
+					role = "ISP Fallback"
 				}
 				list = append(list, UpstreamInfo{
 					ID:          k,
@@ -526,13 +526,13 @@ func (ws *webServer) registerRoutes() {
 			Content string `json:"content"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"status":"error","message":"Cuerpo JSON inválido"}`, http.StatusBadRequest)
+			http.Error(w, `{"status":"error","message":"Invalid JSON body"}`, http.StatusBadRequest)
 			return
 		}
 
 		content := strings.TrimSpace(req.Content)
 		if content == "" {
-			http.Error(w, `{"status":"error","message":"El contenido de configuración no puede estar vacío"}`, http.StatusBadRequest)
+			http.Error(w, `{"status":"error","message":"Configuration content cannot be empty"}`, http.StatusBadRequest)
 			return
 		}
 
@@ -542,7 +542,7 @@ func (ws *webServer) registerRoutes() {
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"status":  "error",
-				"message": fmt.Sprintf("Error de sintaxis TOML: %s", err.Error()),
+				"message": fmt.Sprintf("TOML syntax error: %s", err.Error()),
 			})
 			return
 		}
@@ -566,7 +566,7 @@ func (ws *webServer) registerRoutes() {
 			w.WriteHeader(http.StatusInternalServerError)
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"status":  "error",
-				"message": fmt.Sprintf("No se pudo escribir archivo temporal: %s", err.Error()),
+				"message": fmt.Sprintf("Could not write temporary file: %s", err.Error()),
 			})
 			return
 		}
@@ -575,7 +575,7 @@ func (ws *webServer) registerRoutes() {
 			w.WriteHeader(http.StatusInternalServerError)
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"status":  "error",
-				"message": fmt.Sprintf("No se pudo aplicar el archivo de configuración: %s", err.Error()),
+				"message": fmt.Sprintf("Could not apply configuration file: %s", err.Error()),
 			})
 			return
 		}
@@ -588,7 +588,7 @@ func (ws *webServer) registerRoutes() {
 
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"status":  "ok",
-			"message": "Configuración guardada y recargada exitosamente.",
+			"message": "Configuration saved and reloaded successfully.",
 			"backup":  bakPath,
 			"path":    filePath,
 		})
@@ -603,7 +603,7 @@ func (ws *webServer) registerRoutes() {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"status":  "ok",
-			"message": "Reinicio y recarga en caliente en progreso...",
+			"message": "Restart and hot reload in progress...",
 		})
 		go func() {
 			time.Sleep(300 * time.Millisecond)
